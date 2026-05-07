@@ -1,9 +1,9 @@
-import dkin
+import DKIN.dkin as dkin
 import torch
-from dkin import SequenceDataset
-from dkin import DataLoader
-from dkin import DKIN
-from dkin import train_dkin
+from DKIN.dkin import SequenceDataset
+from DKIN.dkin import DataLoader
+from DKIN.dkin import DKIN
+from DKIN.dkin import train_dkin
 
 def main():
     num_samples = 1000

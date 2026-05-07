@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from basicParts_dkin.basicFunctions import reparameterize, gaussian_kl
-from basicParts_dkin.TemporalEncoder import TemporalEncoder
-from basicParts_dkin.ObservationGenerator import ObservationGenerator
-from basicParts_dkin.KoopmanLayer import KoopmanLayer
-from basicParts_dkin.ConditionalPN import ConditionalPrior
-from basicParts_dkin.Decoder import Decoder
+from DKIN.basicParts_dkin.basicFunctions import reparameterize, gaussian_kl
+from DKIN.basicParts_dkin.TemporalEncoder import TemporalEncoder
+from DKIN.basicParts_dkin.ObservationGenerator import ObservationGenerator
+from DKIN.basicParts_dkin.KoopmanLayer import KoopmanLayer
+from DKIN.basicParts_dkin.ConditionalPN import ConditionalPrior
+from DKIN.basicParts_dkin.Decoder import Decoder
 
 # ============================================================
 # 7. Full DKIN Model
