@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from convarianceNet import initCovarianceNet
 
 class ConditionalPN(nn.Module):
     def __init__(self, z_dim, u_dim, x_dim, T):
@@ -12,26 +13,22 @@ class ConditionalPN(nn.Module):
         self.U_dim = x_dim + T * u_dim
         self.mu = torch.zeros(self.Z_dim)
         self.cov = torch.zeros(self.Z_dim, self.Z_dim)
-        self.net_logvar_z0 = nn.Sequential(
-            nn.Linear(x_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, z_dim)
-            )
+        self.net_Sigma_00 = initCovarianceNet(x_dim, z_dim)
     
     def forward(self, Z_j, U_j, nn_Wc, nn_A, nn_B):
-        ut_ = U_j[0 : self.x_dim - 1]
-        logvar_z0 = self.net_logvar_z0(ut_)
-        Sigma_z0 = torch.diag(torch.exp(logvar_z0))
-        self.fullfill_diag_cov_blocks(nn_A.weight , Sigma_z0)
+        u0 = U_j[0 : self.x_dim - 1]
+        u0 = u0.unsqueeze(0)
+        Sigma_00 = self.net_Sigma_00(u0)
+        self.fullfill_cov_blocks(nn_A.weight , Sigma_00)
         self.fullfill_mu(self, Z_j, U_j, nn_Wc, nn_A, nn_B)
         return self.mu, self.cov
 
     """_函数说明_
-        这计算先验分布中, 隐变量 Z 的分布协方差矩阵的主对角线上的矩阵块的函数，考虑到 Z 的各子项之间存在强相关性,
+        这计算先验分布中, 隐变量 Z 的由矩阵块构成的协方差矩阵，考虑到 Z 的各子项z_t之间存在强相关性,
     因此协方差矩阵除了次对角线矩阵块不为零外, 主对角线的矩阵块还满足分布 Sigma_tt = A * Sigma_tt * A^T
     这里的矩阵 A 是一个待训练的参数，通过前面的网络获得, Sigma 是 z_t 的方差矩阵, 不含对数部分
     """
-    def fullfill_diag_cov_blocks(self,A,Sigma_00):
+    def fullfill_cov_blocks(self,A,Sigma_00):
         self.cov[0:self.z_dim - 1, 0:self.z_dim - 1] = Sigma_00
         Sigma_ii = Sigma_00
         for i in range(1, self.T):
