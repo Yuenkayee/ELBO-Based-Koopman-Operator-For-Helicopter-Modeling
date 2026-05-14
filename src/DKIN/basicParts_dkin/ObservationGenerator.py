@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+
 # ============================================================
 # 3. Observation Generation Block
 # ============================================================
+
 
 class ObservationGenerator(nn.Module):
     """
@@ -28,23 +30,19 @@ class ObservationGenerator(nn.Module):
 
         # Initial recognition network
         self.init_net = nn.Sequential(
-            nn.Linear(embed_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 2 * h_dim)
+            nn.Linear(embed_dim, 128), nn.ReLU(), nn.Linear(128, 2 * h_dim)
         )
 
         # GRU for summarizing previous observations h_{1:t-1}
         self.obs_gru = nn.GRU(
-            input_size=h_dim,
-            hidden_size=gru_hidden_dim,
-            batch_first=True
+            input_size=h_dim, hidden_size=gru_hidden_dim, batch_first=True
         )
 
         # Recognition network for h_t
         self.recognition_net = nn.Sequential(
             nn.Linear(embed_dim + gru_hidden_dim, 128),
             nn.ReLU(),
-            nn.Linear(128, 2 * h_dim)
+            nn.Linear(128, 2 * h_dim),
         )
 
     def initial_distribution(self, I_hat):

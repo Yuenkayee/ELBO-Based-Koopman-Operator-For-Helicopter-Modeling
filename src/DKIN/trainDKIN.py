@@ -5,6 +5,7 @@ from DKIN.dkin import DataLoader
 from DKIN.dkin import DKIN
 from DKIN.dkin import train_dkin
 
+
 def main():
     num_samples = 1000
     batch = 100
@@ -19,12 +20,7 @@ def main():
     u_test = torch.randn(batch, T - 1, u_dim)
     dataset = SequenceDataset(x_data, u_data)
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=64,
-        shuffle=True,
-        drop_last=True
-    )
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=True, drop_last=True)
 
     model = DKIN(
         x_dim=x_dim,
@@ -32,7 +28,7 @@ def main():
         h_dim=h_dim,
         temporal_hidden_dim=64,
         temporal_embed_dim=64,
-        obs_gru_hidden_dim=64
+        obs_gru_hidden_dim=64,
     )
 
     trained_model = train_dkin(
@@ -43,9 +39,9 @@ def main():
         kappa_1=1.2,
         kappa_2=1.0,
         omega_T=5.0,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu",
     )
-    
+
     trained_model.eval()
 
     with torch.no_grad():

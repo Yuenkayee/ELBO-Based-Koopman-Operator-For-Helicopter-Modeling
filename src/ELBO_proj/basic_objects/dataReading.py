@@ -39,15 +39,9 @@ def load_matlab_simulation_data(mat_filename="Data.mat"):
 
     mat_data = sio.loadmat(mat_path)
 
-    result_names = [
-        name for name in mat_data.keys()
-        if name.startswith("simu_result_")
-    ]
+    result_names = [name for name in mat_data.keys() if name.startswith("simu_result_")]
 
-    input_names = [
-        name for name in mat_data.keys()
-        if name.startswith("simu_input_")
-    ]
+    input_names = [name for name in mat_data.keys() if name.startswith("simu_input_")]
 
     result_names = sorted(result_names, key=get_number_from_name)
     input_names = sorted(input_names, key=get_number_from_name)

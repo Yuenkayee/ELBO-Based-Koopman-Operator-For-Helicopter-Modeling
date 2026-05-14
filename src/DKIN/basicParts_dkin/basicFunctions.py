@@ -5,6 +5,7 @@ import torch.nn as nn
 # 1. Basic utility functions
 # ============================================================
 
+
 def reparameterize(mu, logvar):
     """
     Reparameterization trick:
@@ -29,10 +30,6 @@ def gaussian_kl(mu_q, logvar_q, mu_p, logvar_p):
     var_q = torch.exp(logvar_q)
     var_p = torch.exp(logvar_p)
 
-    kl = 0.5 * (
-        logvar_p - logvar_q
-        + (var_q + (mu_q - mu_p) ** 2) / var_p
-        - 1.0
-    )
+    kl = 0.5 * (logvar_p - logvar_q + (var_q + (mu_q - mu_p) ** 2) / var_p - 1.0)
 
     return kl.sum(dim=-1).mean()

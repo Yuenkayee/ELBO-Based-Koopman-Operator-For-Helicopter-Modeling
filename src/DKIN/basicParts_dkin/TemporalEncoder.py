@@ -5,6 +5,7 @@ import torch.nn as nn
 # 2. Temporal Encoder: bidirectional LSTM
 # ============================================================
 
+
 class TemporalEncoder(nn.Module):
     """
     Temporal encoder:
@@ -47,7 +48,7 @@ class TemporalEncoder(nn.Module):
             input_size=x_dim + u_dim,
             hidden_size=hidden_dim,
             batch_first=True,
-            bidirectional=True # 表明这是双向 LSTM
+            bidirectional=True,  # 表明这是双向 LSTM
         )
         ## nn.Linear 是全连接线性层 y = x * W^T + b，主要作用是改变特征维度，可以作为编码器和解码器，参数是（输入维度，输出维度）
         # 这里的主要作用是进行线性投影（初始化了一个线性投影的类）
@@ -60,9 +61,11 @@ class TemporalEncoder(nn.Module):
         # Pad u_T as zero so that u_seq_pad has length T
         # 待拼接的张量 u_pad，相当于为了补全 T_t = [x_t, u_t] 对，人为添加了一个零控制输入
         u_pad = torch.zeros(
-            batch_size, 1, self.u_dim,
-            device=x_seq.device, # 创建出来的零张量和 x_seq 使用相同的设备（相同的 CPU 或者 GPU）
-            dtype=x_seq.dtype    # 创建出来的零张量和 x_seq 使用相同的数据类型
+            batch_size,
+            1,
+            self.u_dim,
+            device=x_seq.device,  # 创建出来的零张量和 x_seq 使用相同的设备（相同的 CPU 或者 GPU）
+            dtype=x_seq.dtype,  # 创建出来的零张量和 x_seq 使用相同的数据类型
         )
 
         # torch.cat 是用于拼接张量的函数
@@ -75,4 +78,3 @@ class TemporalEncoder(nn.Module):
         I_hat = torch.tanh(self.proj(lstm_out))
 
         return I_hat
-

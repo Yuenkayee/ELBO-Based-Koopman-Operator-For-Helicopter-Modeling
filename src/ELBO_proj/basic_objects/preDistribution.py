@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from convarianceNet import initCovarianceNet
+from src.ELBO_proj.basic_objects.convarianceNet import initCovarianceNet
 
 class ConditionalPN(nn.Module):
     def __init__(self, z_dim, u_dim, x_dim, T):

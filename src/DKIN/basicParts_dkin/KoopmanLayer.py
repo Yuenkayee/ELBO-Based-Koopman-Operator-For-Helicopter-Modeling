@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+
 # ============================================================
 # 5. Koopman Layer
 # ============================================================
+
 
 class KoopmanLayer(nn.Module):
     """
@@ -74,11 +76,7 @@ class KoopmanLayer(nn.Module):
             B = K[:, h_dim:]
 
             # Small regularization for numerical stability
-            A = A + self.reg * torch.eye(
-                h_dim,
-                device=h_seq.device,
-                dtype=h_seq.dtype
-            )
+            A = A + self.reg * torch.eye(h_dim, device=h_seq.device, dtype=h_seq.dtype)
 
             A_list.append(A)
             B_list.append(B)
@@ -89,7 +87,6 @@ class KoopmanLayer(nn.Module):
         return A, B
 
     def backward_rollout(self, h_seq, u_seq, A, B):
-
         """
 
         Backward-time latent rollout:

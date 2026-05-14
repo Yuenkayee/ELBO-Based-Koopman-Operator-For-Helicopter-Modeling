@@ -15,6 +15,7 @@ import torch.nn.functional as F
                 Sigma_00 = Sigma_00[0]  # [dim_z, dim_z]
 """
 
+
 class initCovarianceNet(nn.Module):
     def __init__(self, dim_u, dim_z, hidden_dim=64):
         super().__init__()
@@ -27,7 +28,7 @@ class initCovarianceNet(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, dim_z * dim_z)
+            nn.Linear(hidden_dim, dim_z * dim_z),
         )
 
     def forward(self, u0):

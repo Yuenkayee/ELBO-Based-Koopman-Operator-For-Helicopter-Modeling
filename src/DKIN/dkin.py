@@ -13,6 +13,7 @@ from DKIN.basicParts_dkin.Decoder import Decoder
 # 7. Full DKIN Model
 # ============================================================
 
+
 class DKIN(nn.Module):
     """
     Full DKIN model.
@@ -38,7 +39,7 @@ class DKIN(nn.Module):
         h_dim,
         temporal_hidden_dim=64,
         temporal_embed_dim=64,
-        obs_gru_hidden_dim=64
+        obs_gru_hidden_dim=64,
     ):
         super().__init__()
 
@@ -50,29 +51,18 @@ class DKIN(nn.Module):
             x_dim=x_dim,
             u_dim=u_dim,
             hidden_dim=temporal_hidden_dim,
-            embed_dim=temporal_embed_dim
+            embed_dim=temporal_embed_dim,
         )
 
         self.observation_generator = ObservationGenerator(
-            embed_dim=temporal_embed_dim,
-            h_dim=h_dim,
-            gru_hidden_dim=obs_gru_hidden_dim
+            embed_dim=temporal_embed_dim, h_dim=h_dim, gru_hidden_dim=obs_gru_hidden_dim
         )
 
-        self.conditional_prior = ConditionalPrior(
-            h_dim=h_dim,
-            u_dim=u_dim
-        )
+        self.conditional_prior = ConditionalPrior(h_dim=h_dim, u_dim=u_dim)
 
-        self.koopman_layer = KoopmanLayer(
-            h_dim=h_dim,
-            u_dim=u_dim
-        )
+        self.koopman_layer = KoopmanLayer(h_dim=h_dim, u_dim=u_dim)
 
-        self.decoder = Decoder(
-            h_dim=h_dim,
-            x_dim=x_dim
-        )
+        self.decoder = Decoder(h_dim=h_dim, x_dim=x_dim)
 
     def forward(self, x_seq, u_seq):
         batch_size, T, _ = x_seq.shape
@@ -95,10 +85,7 @@ class DKIN(nn.Module):
         logvar_prior_h1 = torch.zeros_like(logvar_h1)
 
         kl_loss = gaussian_kl(
-            mu_q=mu_h1,
-            logvar_q=logvar_h1,
-            mu_p=mu_prior_h1,
-            logvar_p=logvar_prior_h1
+            mu_q=mu_h1, logvar_q=logvar_h1, mu_p=mu_prior_h1, logvar_p=logvar_prior_h1
         )
 
         # ------------------------------------------------------
@@ -112,27 +99,20 @@ class DKIN(nn.Module):
             I_hat_t = I_hat[:, t, :]
 
             mu_q, logvar_q = self.observation_generator.recognition_distribution(
-                I_hat_t=I_hat_t,
-                h_history=h_history
+                I_hat_t=I_hat_t, h_history=h_history
             )
 
             h_prev = h_list[-1]
             u_prev = u_seq[:, t - 1, :]
 
-            mu_p, logvar_p = self.conditional_prior(
-                h_prev=h_prev,
-                u_prev=u_prev
-            )
+            mu_p, logvar_p = self.conditional_prior(h_prev=h_prev, u_prev=u_prev)
 
             h_t = reparameterize(mu_q, logvar_q)
 
-            h_list.append(h_t) # 在 h_list 末尾添加一个新的元素
+            h_list.append(h_t)  # 在 h_list 末尾添加一个新的元素
 
             kl_loss = kl_loss + gaussian_kl(
-                mu_q=mu_q,
-                logvar_q=logvar_q,
-                mu_p=mu_p,
-                logvar_p=logvar_p
+                mu_q=mu_q, logvar_q=logvar_q, mu_p=mu_p, logvar_p=logvar_p
             )
 
         h_seq = torch.stack(h_list, dim=1)
@@ -145,12 +125,7 @@ class DKIN(nn.Module):
         # ------------------------------------------------------
         # Step 5: Backward latent rollout
         # ------------------------------------------------------
-        z_seq = self.koopman_layer.backward_rollout(
-            h_seq=h_seq,
-            u_seq=u_seq,
-            A=A,
-            B=B
-        )
+        z_seq = self.koopman_layer.backward_rollout(h_seq=h_seq, u_seq=u_seq, A=A, B=B)
 
         # ------------------------------------------------------
         # Step 6: Decoding
@@ -163,13 +138,14 @@ class DKIN(nn.Module):
             "z_seq": z_seq,
             "A": A,
             "B": B,
-            "kl_loss": kl_loss
+            "kl_loss": kl_loss,
         }
 
 
 # ============================================================
 # 8. Dataset wrapper
 # ============================================================
+
 
 class SequenceDataset(Dataset):
     """
@@ -204,6 +180,7 @@ class SequenceDataset(Dataset):
 # 9. Training function
 # ============================================================
 
+
 def train_dkin(
     model,
     dataloader,
@@ -212,7 +189,7 @@ def train_dkin(
     kappa_1=1.2,
     kappa_2=1.0,
     omega_T=5.0,
-    device="cpu"
+    device="cpu",
 ):
     """
     Train DKIN model.
@@ -248,15 +225,11 @@ def train_dkin(
 
             # Prediction loss
             pred_loss_main = F.mse_loss(
-                mu_seq[:, :-1, :],
-                x_seq[:, :-1, :],
-                reduction="mean"
+                mu_seq[:, :-1, :], x_seq[:, :-1, :], reduction="mean"
             )
 
             pred_loss_terminal = F.mse_loss(
-                mu_seq[:, -1, :],
-                x_seq[:, -1, :],
-                reduction="mean"
+                mu_seq[:, -1, :], x_seq[:, -1, :], reduction="mean"
             )
 
             pred_loss = pred_loss_main + omega_T * pred_loss_terminal

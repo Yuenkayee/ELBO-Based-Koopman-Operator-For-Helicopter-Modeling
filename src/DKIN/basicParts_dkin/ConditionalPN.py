@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+
 # ============================================================
 # 4. Conditional Prior Network
 # ============================================================
+
 
 class ConditionalPrior(nn.Module):
     """
@@ -17,9 +19,7 @@ class ConditionalPrior(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Linear(h_dim + u_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 2 * h_dim)
+            nn.Linear(h_dim + u_dim, 128), nn.ReLU(), nn.Linear(128, 2 * h_dim)
         )
 
     def forward(self, h_prev, u_prev):
