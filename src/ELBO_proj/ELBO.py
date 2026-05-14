@@ -52,27 +52,30 @@ class ELBO(nn.Module):
             Z_j = reparameterize_full_cov(mu_after, cov_after, self.z_dim, self.T)
             mu_pre, cov_pre = self.nn_pre(Z_j, U_j, self.nn_Wc, self.nn_A, self.nn_B)
             X_hat_j = decoder(mu_pre, self.nn_C, self.T, self.x_dim, self.z_dim)
+            eye = torch.eye(self.z_dim * (self.T + 1))
             loss += (
                 F.mse_loss(X_hat_j, X_j)
-                + self.para_mu * torch.mean((self.nn_c.weight - self.nn_Wc.weight) ** 2)
+                + self.para_mu
+                * torch.mean((self.nn_c.weight @ self.nn_Wc.weight - eye) ** 2)
                 + self.para_lambda
                 * kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre)
             )
-            
+
             return {
                 "A": self.nn_A.weight,
                 "B": self.nn_B.weight,
                 "C": self.nn_C.weight,
-                "loss": loss
+                "loss": loss,
             }
 
 
-def train_elbo(model,
-               trainData,
-               num_epochs=1000,
-               lr=5e-4,
-               device="gpu",
-               ):
+def train_elbo(
+    model,
+    trainData,
+    num_epochs=1000,
+    lr=5e-4,
+    device="gpu",
+):
     """_summary_
 
     Args:
@@ -90,16 +93,13 @@ def train_elbo(model,
         U_seq = trainData.U_seq
         X_seq = X_seq.to(device)
         U_seq = U_seq.to(device)
-        
+
         out = model(X_seq, U_seq)
-        
+
         loss = out["loss"]
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
-        print(
-            f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] "
-            f"Loss: {loss:.6f}"
-        )
+
+        print(f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] " f"Loss: {loss:.6f}")
     return model

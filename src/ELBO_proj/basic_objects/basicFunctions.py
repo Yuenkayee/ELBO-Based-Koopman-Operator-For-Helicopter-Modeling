@@ -67,43 +67,33 @@ def kl_divergence_gaussian(mu_1, cov_1, mu_2, cov_2, eps=1e-6):
     """
 
     Z_dim = mu_1.shape[0]
-
     assert mu_1.shape == (Z_dim,)
-
     assert mu_2.shape == (Z_dim,)
-
     assert cov_1.shape == (Z_dim, Z_dim)
-
     assert cov_2.shape == (Z_dim, Z_dim)
 
     # 数值稳定：给协方差矩阵加一个很小的对角项
 
     eye = torch.eye(Z_dim, device=mu_1.device, dtype=mu_1.dtype)
-
     cov_1 = cov_1 + eps * eye
-
     cov_2 = cov_2 + eps * eye
 
     # 均值差
 
     diff = mu_2 - mu_1
-
     # log |cov_2| - log |cov_1|
 
     logdet_cov_1 = torch.logdet(cov_1)
-
     logdet_cov_2 = torch.logdet(cov_2)
 
     # cov_2^{-1} cov_1
 
     cov_2_inv_cov_1 = torch.linalg.solve(cov_2, cov_1)
-
     trace_term = torch.trace(cov_2_inv_cov_1)
 
     # (mu_2 - mu_1)^T cov_2^{-1} (mu_2 - mu_1)
 
     mahalanobis_term = diff @ torch.linalg.solve(cov_2, diff)
-
     kl = 0.5 * (
 
         logdet_cov_2

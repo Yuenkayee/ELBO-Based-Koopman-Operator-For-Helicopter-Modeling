@@ -1,117 +1,106 @@
 import os
-import re
-import numpy as np
-import scipy.io as sio
+from dataclasses import dataclass
+
 import torch
+import scipy.io as sio
 
 
-def get_number_from_name(name):
+@dataclass
+class TrainData:
+    X_seq: torch.Tensor
+    U_seq: torch.Tensor
+
+
+def load_matlab_simulation_data(
+    file_path: str = None,
+    S: int = None,
+    dtype=torch.float32,
+):
     """
-    从变量名中提取最后的编号。
-    例如：
-        simu_result_12 -> 12
-        simu_input_3   -> 3
-    """
-    match = re.search(r"_(\d+)$", name)
+    从 /data/orinigalData.mat 中读取 S 组仿真数据，并构造 trainData。
 
-    if match is None:
-        raise ValueError(f"变量名 {name} 不符合 xxx_编号 的格式")
-
-    return int(match.group(1))
-
-
-def load_matlab_simulation_data(mat_filename="Data.mat"):
-    """
-    从 Data.mat 中读取：
-        simu_result_1, simu_result_2, ..., simu_result_batch
-        simu_input_1,  simu_input_2,  ..., simu_input_batch
-
-    每个 simu_result_i 的 shape 应为 [T, dim]
-    每个 simu_input_i  的 shape 应为 [T, dim_u]
+    每组数据要求：
+        simu_result_i.shape == [T + 1, x_dim]
+        simu_input_i.shape  == [T, u_dim]
 
     返回：
-        data:       torch.Tensor, shape = [batch, T, dim]
-        data_input: torch.Tensor, shape = [batch, T, dim_u]
+        trainData.X_seq.shape == [S, T * x_dim]
+        trainData.U_seq.shape == [S, x_dim + T * u_dim]
     """
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    mat_path = os.path.join(current_dir, mat_filename)
+    if file_path is None:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(current_dir, "data", "orinigalData.mat")
 
-    mat_data = sio.loadmat(mat_path)
+    mat_data = sio.loadmat(file_path)
 
-    result_names = [name for name in mat_data.keys() if name.startswith("simu_result_")]
+    if S is None:
+        S = 0
+        while f"simu_result_{S + 1}" in mat_data:
+            S += 1
 
-    input_names = [name for name in mat_data.keys() if name.startswith("simu_input_")]
+        if S == 0:
+            raise ValueError("没有在 .mat 文件中找到 simu_result_i 数据。")
 
-    result_names = sorted(result_names, key=get_number_from_name)
-    input_names = sorted(input_names, key=get_number_from_name)
+    X_seq_list = []
+    U_seq_list = []
 
-    if len(result_names) == 0:
-        raise ValueError("Data.mat 中没有找到 simu_result_i 形式的变量")
+    for i in range(1, S + 1):
+        x_key = f"simu_result_{i}"
+        u_key = f"simu_input_{i}"
 
-    if len(input_names) == 0:
-        raise ValueError("Data.mat 中没有找到 simu_input_i 形式的变量")
+        if x_key not in mat_data:
+            raise KeyError(f"缺少变量：{x_key}")
 
-    if len(result_names) != len(input_names):
-        raise ValueError(
-            f"状态结果数量和输入数量不一致："
-            f"simu_result 数量 = {len(result_names)}, "
-            f"simu_input 数量 = {len(input_names)}"
+        if u_key not in mat_data:
+            raise KeyError(f"缺少变量：{u_key}")
+
+        X_i = mat_data[x_key]      # shape: [T + 1, x_dim]
+        U_i = mat_data[u_key]      # shape: [T, u_dim]
+
+        X_i = torch.tensor(X_i, dtype=dtype)
+        U_i = torch.tensor(U_i, dtype=dtype)
+
+        if X_i.ndim != 2:
+            raise ValueError(f"{x_key} 应该是二维矩阵，但实际维度为 {X_i.shape}")
+
+        if U_i.ndim != 2:
+            raise ValueError(f"{u_key} 应该是二维矩阵，但实际维度为 {U_i.shape}")
+
+        T_plus_1, x_dim = X_i.shape
+        T, u_dim = U_i.shape
+
+        if T_plus_1 != T + 1:
+            raise ValueError(
+                f"{x_key} 和 {u_key} 的时间长度不匹配："
+                f"{x_key}.shape={X_i.shape}, {u_key}.shape={U_i.shape}"
+            )
+
+        # X_seq 中只保存 x_1 到 x_T
+        # X_i[1:, :].shape == [T, x_dim]
+        # reshape 后得到 [T * x_dim]
+        X_vec = X_i[1:, :].reshape(-1)
+
+        # U_seq 中保存 x_0, u_0, ..., u_{T-1}
+        # X_i[0, :].shape == [x_dim]
+        # U_i.reshape(-1).shape == [T * u_dim]
+        U_vec = torch.cat(
+            [
+                X_i[0, :],
+                U_i.reshape(-1),
+            ],
+            dim=0,
         )
 
-    result_indices = [get_number_from_name(name) for name in result_names]
-    input_indices = [get_number_from_name(name) for name in input_names]
+        X_seq_list.append(X_vec)
+        U_seq_list.append(U_vec)
 
-    if result_indices != input_indices:
-        raise ValueError(
-            f"simu_result_i 和 simu_input_i 的编号不一致：\n"
-            f"result 编号 = {result_indices}\n"
-            f"input 编号  = {input_indices}"
-        )
+    X_seq = torch.stack(X_seq_list, dim=0)
+    U_seq = torch.stack(U_seq_list, dim=0)
 
-    result_list = []
-    input_list = []
+    trainData = TrainData(
+        X_seq=X_seq,
+        U_seq=U_seq,
+    )
 
-    for result_name, input_name in zip(result_names, input_names):
-        result = np.array(mat_data[result_name])
-        simu_input = np.array(mat_data[input_name])
-
-        if result.ndim != 2:
-            raise ValueError(
-                f"{result_name} 的维度不是二维矩阵，当前 shape = {result.shape}"
-            )
-
-        if simu_input.ndim != 2:
-            raise ValueError(
-                f"{input_name} 的维度不是二维矩阵，当前 shape = {simu_input.shape}"
-            )
-
-        if result.shape[0] != simu_input.shape[0]:
-            raise ValueError(
-                f"{result_name} 和 {input_name} 的时间长度 T 不一致："
-                f"{result_name}.shape = {result.shape}, "
-                f"{input_name}.shape = {simu_input.shape}"
-            )
-
-        result_list.append(result)
-        input_list.append(simu_input)
-
-    data_states = np.stack(result_list, axis=0)
-    data_input = np.stack(input_list, axis=0)
-
-    data_states = torch.tensor(data_states, dtype=torch.float32)
-    data_input = torch.tensor(data_input, dtype=torch.float32)
-
-    return data_states, data_input
-
-
-if __name__ == "__main__":
-    data, data_input = load_matlab_simulation_data("Data.mat")
-
-    print("data.shape =", data.shape)
-    print("data_input.shape =", data_input.shape)
-
-    print("batch =", data.shape[0])
-    print("T =", data.shape[1])
-    print("dim =", data.shape[2])
-    print("dim_u =", data_input.shape[2])
+    return trainData
