@@ -1,6 +1,9 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import scipy.io as sio
 from src.ELBO_proj.basic_objects.dataReading import load_matlab_simulation_data
 from src.ELBO_proj.basic_objects.afterDistribution import afterDistirbution
 from src.ELBO_proj.basic_objects.preDistribution import ConditionalPN
@@ -34,8 +37,8 @@ class ELBO(nn.Module):
             训练用数据集 X_seq 和 U_seq 定义如下：
         X_seq: 
             X_seq = {X_0, X_1, ..., X_{S - 1}}
-            其中, X_i = {x_0, x_1, ..., x_{T - 1}, x_T}
-            因此, X_seq.shape = [S, (T + 1) * x_dim] 
+            其中, X_i = {x_1, ..., x_{T - 1}, x_T}
+            因此, X_seq.shape = [S, T * x_dim] 
         U_seq:
             U_seq = {U_0, U_1, ..., U_{S - 1}}
             其中, U_i = {x_0, u_0, u_1, ..., u_{T - 1}}
@@ -44,29 +47,32 @@ class ELBO(nn.Module):
 
     def forward(self, X_seq, U_seq):
         S, _ = X_seq.shape
-        loss = 0
+        loss = X_seq.new_tensor(0.0)
+
         for j in range(S):
             X_j = X_seq[j]
             U_j = U_seq[j]
+
             mu_after, cov_after = self.nn_after(X_j, U_j, self.nn_A)
             Z_j = reparameterize_full_cov(mu_after, cov_after, self.z_dim, self.T)
             mu_pre, cov_pre = self.nn_pre(Z_j, U_j, self.nn_Wc, self.nn_A, self.nn_B)
             X_hat_j = decoder(mu_pre, self.nn_C, self.T, self.x_dim, self.z_dim)
-            eye = torch.eye(self.z_dim * (self.T + 1))
-            loss += (
-                F.mse_loss(X_hat_j, X_j)
-                + self.para_mu
-                * torch.mean((self.nn_c.weight @ self.nn_Wc.weight - eye) ** 2)
-                + self.para_lambda
-                * kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre)
-            )
 
-            return {
-                "A": self.nn_A.weight,
-                "B": self.nn_B.weight,
-                "C": self.nn_C.weight,
-                "loss": loss,
-            }
+            eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
+            reconstruction_loss = F.mse_loss(X_hat_j, X_j)
+            inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
+            kl_loss = kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre)
+
+            loss = loss + reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
+
+        loss = loss / S
+
+        return {
+            "A": self.nn_A.weight,
+            "B": self.nn_B.weight,
+            "C": self.nn_C.weight,
+            "loss": loss,
+        }
 
 
 def train_elbo(
@@ -74,7 +80,7 @@ def train_elbo(
     trainData,
     num_epochs=1000,
     lr=5e-4,
-    device="gpu",
+    device=None,
 ):
     """_summary_
 
@@ -83,8 +89,16 @@ def train_elbo(
         trainData (_type_): X_seq and U_seq
         num_epochs (int, optional): Defaults to 1000.
         lr (_type_, optional): Defaults to 5e-4.
-        device (str, optional): Defaults to "gpu".
+        device (str, optional): Defaults to None. If None, automatically selects cuda, mps, or cpu.
     """
+    if device is None:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     for epoch in range(num_epochs):
@@ -94,12 +108,49 @@ def train_elbo(
         X_seq = X_seq.to(device)
         U_seq = U_seq.to(device)
 
+        optimizer.zero_grad()
         out = model(X_seq, U_seq)
 
         loss = out["loss"]
-        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        print(f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] " f"Loss: {loss:.6f}")
+        print(f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] " f"Loss: {loss.item():.6f}")
     return model
+
+
+def save_elbo_train_result(model, file_path=None):
+    """
+    Save the trained weight matrices A, B, and C of an ELBO model to a .mat file.
+
+    The default output path is:
+        ./data/trainResult.mat
+
+    MATLAB can read the saved matrices using:
+        load('data/trainResult.mat')
+
+    Saved variables:
+        A: shape [z_dim, z_dim]
+        B: shape [z_dim, u_dim]
+        C: shape [x_dim, z_dim]
+    """
+    if file_path is None:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(current_dir, "data", "trainResult.mat")
+
+    output_dir = os.path.dirname(file_path)
+    if output_dir != "":
+        os.makedirs(output_dir, exist_ok=True)
+
+    model_cpu = model.to("cpu")
+    model_cpu.eval()
+
+    train_result = {
+        "A": model_cpu.nn_A.weight.detach().cpu().numpy(),
+        "B": model_cpu.nn_B.weight.detach().cpu().numpy(),
+        "C": model_cpu.nn_C.weight.detach().cpu().numpy(),
+    }
+
+    sio.savemat(file_path, train_result)
+
+    return file_path

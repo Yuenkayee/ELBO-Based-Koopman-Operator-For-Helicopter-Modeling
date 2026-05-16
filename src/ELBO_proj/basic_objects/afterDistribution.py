@@ -14,16 +14,15 @@ class afterDistirbution(nn.Module):
         self.U_dim = x_dim + T * u_dim
         self.X_dim = T * x_dim
 
-        self.mu = torch.zeros(self.Z_dim)
-        self.cov = torch.zeros(self.Z_dim, self.Z_dim)
+        # mu, cov, and I_seq are constructed in forward(), so that they are
+        # placed on the same device and use the same dtype as the input data.
 
-        self.I_seq = torch.zeros(T + 1, x_dim + u_dim)
         self.initCov = initCovarianceNet(embed_dim, z_dim)
 
         self.lstm = nn.LSTM(
             input_size=x_dim + u_dim,
             hidden_size=h_dim,
-            batch_first=True,
+            batch_first=False,
             bidirectional=True,  # 表明这是双向 LSTM
         )
 
@@ -33,56 +32,79 @@ class afterDistirbution(nn.Module):
         )
 
     def forward(self, X_j, U_j, nn_A):
-        self.construct_I_seq(X_j, U_j)
-        lstm_out = self.lstm(self.I_seq)
-        I_hat = torch.tanh(self.proj(lstm_out))
-        self.mu_net(I_hat)
-        Sigma_00 = self.initCov(I_hat)
-        self.fullfill_cov_blocks(nn_A.weight, Sigma_00)
-        return self.mu, self.cov
+        I_seq = self.construct_I_seq(X_j, U_j)
+
+        # nn.LSTM returns (output, (h_n, c_n)). Only output is needed here.
+        # batch_first=False requires input shape [seq_len, batch_size, input_size].
+        # I_seq has shape [T + 1, x_dim + u_dim], so we add the batch dimension at dim=1.
+        lstm_out, _ = self.lstm(I_seq.unsqueeze(1))
+        I_hat = torch.tanh(self.proj(lstm_out.squeeze(1)))
+
+        # mu_t has shape [T + 1, z_dim], and mu has shape [(T + 1) * z_dim].
+        mu_t = self.mu_net(I_hat)
+        mu = mu_t.reshape(-1)
+
+        # Use the embedding of the initial time step to construct Sigma_00.
+        Sigma_00 = self.initCov(I_hat[0])
+        cov = self.fullfill_cov_blocks(nn_A.weight, Sigma_00)
+
+        return mu, cov
 
     def construct_I_seq(self, X_j, U_j):
-        self.I_seq[0][0 : self.x_dim - 1] = U_j[0 : self.x_dim - 1]
-        self.I_seq[0][self.x_dim : self.x_dim + self.u_dim - 1] = U_j[
-            self.x_dim : self.x_dim + self.u_dim - 1
-        ]
+        I_seq = X_j.new_zeros(self.T + 1, self.x_dim + self.u_dim)
+
+        # U_j = [x_0, u_0, u_1, ..., u_{T-1}]
+        x0 = U_j[0 : self.x_dim]
+        U_flat = U_j[self.x_dim : self.x_dim + self.T * self.u_dim]
+        U_mat = U_flat.reshape(self.T, self.u_dim)
+
+        # X_j = [x_1, x_2, ..., x_T]
+        X_mat = X_j.reshape(self.T, self.x_dim)
+
+        I_seq[0, 0 : self.x_dim] = x0
+        I_seq[0, self.x_dim : self.x_dim + self.u_dim] = U_mat[0]
+
         for t in range(1, self.T):
-            self.I_seq[t][0 : self.x_dim - 1] = X_j[
-                (t - 1) * self.x_dim : t * self.x_dim - 1
-            ]
-            self.I_seq[t][self.x_dim : self.x_dim + self.u_dim - 1] = U_j[
-                (t - 1) * self.u_dim + self.x_dim : t * self.u_dim + self.x_dim - 1
-            ]
-        self.I_seq[self.T][0 : self.x_dim - 1] = X_j[
-            (self.T - 1) * self.x_dim : self.T * self.x_dim - 1
-        ]
-        self.I_seq[self.T][self.x_dim : self.x_dim + self.u_dim - 1] = torch.zeros(
-            self.u_dim
-        )
+            I_seq[t, 0 : self.x_dim] = X_mat[t - 1]
+            I_seq[t, self.x_dim : self.x_dim + self.u_dim] = U_mat[t]
+
+        I_seq[self.T, 0 : self.x_dim] = X_mat[self.T - 1]
+        # The last input is unknown because the data only contains u_0 to u_{T-1}.
+        # Therefore the last u slot remains zero.
+
+        return I_seq
 
     """_函数说明_
-        这计算先验分布中, 隐变量 Z 的由矩阵块构成的协方差矩阵，考虑到 Z 的各子项z_t之间存在强相关性,
+        这计算后验分布中, 隐变量 Z 的由矩阵块构成的协方差矩阵，考虑到 Z 的各子项z_t之间存在强相关性,
     因此协方差矩阵除了次对角线矩阵块不为零外, 主对角线的矩阵块还满足分布 Sigma_tt = A * Sigma_tt * A^T
-    这里的矩阵 A 是一个待训练的参数，通过前面的网络获得, Sigma 是 z_t 的方差矩阵, 不含对数部分
+    这里的矩阵 A 是一个待训练的参数，通过前面的网络获得
     """
 
     def fullfill_cov_blocks(self, A, Sigma_00):
-        self.cov[0 : self.z_dim - 1, 0 : self.z_dim - 1] = Sigma_00
+        cov = Sigma_00.new_zeros(self.Z_dim, self.Z_dim)
+
         Sigma_ii = Sigma_00
-        for i in range(1, self.T):
-            Sigma_ii = A @ Sigma_ii @ A.T
-            self.cov[
-                i * self.z_dim : (i + 1) * self.z_dim - 1,
-                i * self.z_dim : (i + 1) * self.z_dim - 1,
-            ] = Sigma_ii
+
+        for i in range(0, self.T + 1):
+            if i == 0:
+                Sigma_ii = Sigma_00
+            else:
+                Sigma_ii = A @ Sigma_ii @ A.T
+
+            row_i_start = i * self.z_dim
+            row_i_end = (i + 1) * self.z_dim
+            cov[row_i_start:row_i_end, row_i_start:row_i_end] = Sigma_ii
+
             Sigma_ij = Sigma_ii
             for j in range(i + 1, self.T + 1):
                 Sigma_ij = Sigma_ij @ A.T
-                row_i_start = i * self.z_dim
-                row_i_end = (i + 1) * self.z_dim
+
                 col_j_start = j * self.z_dim
                 col_j_end = (j + 1) * self.z_dim
+
                 # Sigma_ij = Cov(z_i, z_j)
-                self.cov[row_i_start:row_i_end, col_j_start:col_j_end] = Sigma_ij
+                cov[row_i_start:row_i_end, col_j_start:col_j_end] = Sigma_ij
                 # Sigma_ji = Cov(z_j, z_i) = Sigma_ij.T
-                self.cov[col_j_start:col_j_end, row_i_start:row_i_end] = Sigma_ij.T
+                cov[col_j_start:col_j_end, row_i_start:row_i_end] = Sigma_ij.T
+
+        return cov

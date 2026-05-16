@@ -36,11 +36,42 @@ def reparameterize_full_cov(mu, cov, z_dim, T, eps=1e-6):
     return Z
 
 def decoder(Z_j, nn_C, T, x_dim, z_dim):
-    X_hat_j = torch.zeros(x_dim * (T + 1))
-    for i in range(T + 1):
-        Z_ji = Z_j[(i - 1) * z_dim : i * z_dim - 1]
-        X_hat_j[(i - 1) * x_dim : i * x_dim - 1] = nn_C(Z_ji)
-    return X_hat_j
+    """
+    Decode latent sequence Z_j into predicted state sequence X_hat_j.
+
+    Input:
+        Z_j: shape [(T + 1) * z_dim] or [T + 1, z_dim]
+             corresponding to [z_0, z_1, ..., z_T]
+        nn_C: linear decoder from z_dim to x_dim
+        T: number of predicted state vectors, x_1 to x_T
+
+    Output:
+        X_hat_j: shape [T * x_dim]
+                 corresponding to [x_1, x_2, ..., x_T], where x_i = C z_i
+    """
+    if Z_j.ndim == 1:
+        Z_mat = Z_j.reshape(T + 1, z_dim)
+    elif Z_j.ndim == 2:
+        Z_mat = Z_j
+    else:
+        raise ValueError(f"Z_j must be a 1D or 2D tensor, but got shape {Z_j.shape}")
+
+    if Z_mat.shape != (T + 1, z_dim):
+        raise ValueError(
+            f"Z_j should have shape [{T + 1}, {z_dim}] after reshape, "
+            f"but got {Z_mat.shape}"
+        )
+
+    # Use z_1, z_2, ..., z_T to reconstruct x_1, x_2, ..., x_T.
+    X_hat_mat = nn_C(Z_mat[1 : T + 1])
+
+    if X_hat_mat.shape != (T, x_dim):
+        raise ValueError(
+            f"Decoded X_hat_mat should have shape [{T}, {x_dim}], "
+            f"but got {X_hat_mat.shape}"
+        )
+
+    return X_hat_mat.reshape(T * x_dim)
 
 def kl_divergence_gaussian(mu_1, cov_1, mu_2, cov_2, eps=1e-6):
 
