@@ -1,4 +1,5 @@
 import os
+import time
 
 import torch
 import torch.nn as nn
@@ -90,9 +91,9 @@ class ELBO(nn.Module):
 def train_elbo(
     model,
     trainData,
-    num_epochs=1000,
+    num_epochs=5,
     lr=5e-4,
-    device="cpu",
+    device="cuda",
 ):
     """_summary_
 
@@ -113,7 +114,13 @@ def train_elbo(
 
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if str(device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(device)
     for epoch in range(num_epochs):
+        epoch_start_time = time.perf_counter()
+        if str(device).startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(device)
+
         model.train()
         X_seq = trainData.X_seq
         U_seq = trainData.U_seq
@@ -130,7 +137,34 @@ def train_elbo(
         loss.backward()
         optimizer.step()
 
-        print(f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] " f"Loss: {loss.item():.6f} | Loss_re: {reconstruction_loss.item():.6f} | Loss_inv: {inverse_loss.item():.6f} | Loss_kl: {kl_loss.item():.6f}")
+        if str(device).startswith("cuda"):
+            torch.cuda.synchronize(device)
+        epoch_time = time.perf_counter() - epoch_start_time
+
+        if str(device).startswith("cuda"):
+            mem_allocated_gb = torch.cuda.memory_allocated(device) / 1024**3
+            mem_reserved_gb = torch.cuda.memory_reserved(device) / 1024**3
+            peak_mem_allocated_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+            memory_info = (
+                f"GPU_mem_alloc: {mem_allocated_gb:.3f} GB | "
+                f"GPU_mem_reserved: {mem_reserved_gb:.3f} GB | "
+                f"GPU_mem_peak: {peak_mem_allocated_gb:.3f} GB"
+            )
+        elif str(device).startswith("mps") and torch.backends.mps.is_available():
+            mem_allocated_gb = torch.mps.current_allocated_memory() / 1024**3
+            memory_info = f"MPS_mem_alloc: {mem_allocated_gb:.3f} GB"
+        else:
+            memory_info = "GPU/MPS memory: unavailable on CPU"
+
+        print(
+            f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] "
+            f"Time: {epoch_time:.3f}s | "
+            f"Loss: {loss.item():.6f} | "
+            f"Loss_re: {reconstruction_loss.item():.6f} | "
+            f"Loss_inv: {inverse_loss.item():.6f} | "
+            f"Loss_kl: {kl_loss.item():.6f} | "
+            f"{memory_info}"
+        )
         
     return model
 
