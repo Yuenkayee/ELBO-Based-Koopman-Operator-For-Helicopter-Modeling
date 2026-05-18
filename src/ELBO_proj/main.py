@@ -1,3 +1,7 @@
+import os
+
+import torch
+
 from ELBO import ELBO
 from ELBO import save_elbo_train_result
 from ELBO import train_elbo
@@ -42,7 +46,44 @@ def main():
         para_lambda=para_lambda,
     )
 
-    model = train_elbo(model=model, trainData=trainData)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    checkpoint_path = os.path.join(current_dir, "data", "elbo_model_checkpoint.pt")
+
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Loaded model checkpoint from: {checkpoint_path}")
+    else:
+        print("No checkpoint found. Train from scratch.")
+
+    model = train_elbo(
+        model=model,
+        trainData=trainData,
+        num_epochs=1000,
+        lr=5e-4,
+        device="cuda",
+    )
+
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    if checkpoint_dir != "":
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    torch.save(
+        {
+            "model_state_dict": model.to("cpu").state_dict(),
+            "x_dim": x_dim,
+            "u_dim": u_dim,
+            "z_dim": z_dim,
+            "h_dim": h_dim,
+            "embed_dim": embed_dim,
+            "T": T,
+            "para_mu": para_mu,
+            "para_lambda": para_lambda,
+        },
+        checkpoint_path,
+    )
+    print(f"Model checkpoint saved to: {checkpoint_path}")
+
     result_file = save_elbo_train_result(model)
     print(f"Training result saved to: {result_file}")
 
