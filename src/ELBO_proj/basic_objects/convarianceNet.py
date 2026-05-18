@@ -33,16 +33,29 @@ class initCovarianceNet(nn.Module):
 
     def forward(self, u0):
         """
-        u0.shape = [batch, dim_u]
+        Construct Sigma_00 from a single input vector or a batch of input vectors.
 
-        return:
-            Sigma_00.shape = [batch, dim_z, dim_z]
+        Accepted input shapes:
+            u0.shape == [dim_u]
+            u0.shape == [batch, dim_u]
+
+        Return shapes:
+            if input shape is [dim_u]:
+                Sigma_00.shape == [dim_z, dim_z]
+            if input shape is [batch, dim_u]:
+                Sigma_00.shape == [batch, dim_z, dim_z]
         """
+        single_input = False
+        if u0.ndim == 1:
+            u0 = u0.unsqueeze(0)
+            single_input = True
+        elif u0.ndim != 2:
+            raise ValueError(f"u0 must be a 1D or 2D tensor, but got shape {u0.shape}")
 
         batch_size = u0.shape[0]
 
         raw_L = self.net(u0)  # [batch, dim_z * dim_z]
-        raw_L = raw_L.view(batch_size, self.dim_z, self.dim_z)
+        raw_L = raw_L.reshape(batch_size, self.dim_z, self.dim_z)
 
         # 取下三角部分
         L = torch.tril(raw_L)
@@ -57,5 +70,8 @@ class initCovarianceNet(nn.Module):
 
         # 构造协方差矩阵
         Sigma_00 = L @ L.transpose(-1, -2)
+
+        if single_input:
+            Sigma_00 = Sigma_00.squeeze(0)
 
         return Sigma_00

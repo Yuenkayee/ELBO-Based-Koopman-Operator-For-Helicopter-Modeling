@@ -17,7 +17,7 @@ def load_matlab_simulation_data(
     dtype=torch.float32,
 ):
     """
-    从 /data/orinigalData.mat 中读取 S 组仿真数据，并构造 trainData。
+    从 ../data/orinigalData.mat 中读取 S 组仿真数据，并构造 trainData。
 
     每组数据要求：
         simu_result_i.shape == [T + 1, x_dim]
@@ -30,7 +30,7 @@ def load_matlab_simulation_data(
 
     if file_path is None:
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(current_dir, "data", "orinigalData.mat")
+        file_path = os.path.join(current_dir, "../data", "trainData.mat")
 
     mat_data = sio.loadmat(file_path)
 

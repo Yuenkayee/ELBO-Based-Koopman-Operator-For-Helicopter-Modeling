@@ -7,11 +7,11 @@ from basic_objects.dataReading import load_matlab_simulation_data
 def main():
     trainData = load_matlab_simulation_data()
 
-    x_dim = 9
+    x_dim = 12
     u_dim = 4
-    z_dim = 32
-    h_dim = 64
-    embed_dim = 128
+    z_dim = 16
+    h_dim = 16
+    embed_dim = 32
     para_mu = 0.8
     para_lambda = 1.5
 

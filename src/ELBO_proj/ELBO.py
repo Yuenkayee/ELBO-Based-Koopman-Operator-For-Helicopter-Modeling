@@ -4,12 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import scipy.io as sio
-from src.ELBO_proj.basic_objects.dataReading import load_matlab_simulation_data
-from src.ELBO_proj.basic_objects.afterDistribution import afterDistirbution
-from src.ELBO_proj.basic_objects.preDistribution import ConditionalPN
-from src.ELBO_proj.basic_objects.basicFunctions import reparameterize_full_cov
-from src.ELBO_proj.basic_objects.basicFunctions import decoder
-from src.ELBO_proj.basic_objects.basicFunctions import kl_divergence_gaussian
+from basic_objects.dataReading import load_matlab_simulation_data
+from basic_objects.afterDistribution import afterDistirbution
+from basic_objects.preDistribution import ConditionalPN
+from basic_objects.basicFunctions import reparameterize_full_cov
+from basic_objects.basicFunctions import decoder
+from basic_objects.basicFunctions import kl_divergence_gaussian
 
 
 class ELBO(nn.Module):
@@ -80,7 +80,7 @@ def train_elbo(
     trainData,
     num_epochs=1000,
     lr=5e-4,
-    device=None,
+    device="cpu",
 ):
     """_summary_
 
