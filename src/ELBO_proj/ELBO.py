@@ -47,7 +47,10 @@ class ELBO(nn.Module):
 
     def forward(self, X_seq, U_seq):
         S, _ = X_seq.shape
-        loss = X_seq.new_tensor(0.0)
+        loss_total = X_seq.new_tensor(0.0)
+        reconstruction_loss_total = X_seq.new_tensor(0.0)
+        inverse_loss_total = X_seq.new_tensor(0.0)
+        kl_loss_total = X_seq.new_tensor(0.0)
 
         for j in range(S):
             X_j = X_seq[j]
@@ -63,15 +66,24 @@ class ELBO(nn.Module):
             inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
             kl_loss = kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre)
 
-            loss = loss + reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
+            loss_total = loss_total + reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
+            reconstruction_loss_total += reconstruction_loss
+            inverse_loss_total += inverse_loss
+            kl_loss_total += kl_loss
 
-        loss = loss / S
+        loss_total = loss_total / S
+        reconstruction_loss_total = reconstruction_loss_total / S
+        inverse_loss_total = inverse_loss_total / S
+        kl_loss_total = kl_loss_total / S
 
         return {
             "A": self.nn_A.weight,
             "B": self.nn_B.weight,
             "C": self.nn_C.weight,
-            "loss": loss,
+            "loss": loss_total,
+            "reconstruction_loss": reconstruction_loss_total,
+            "inverse_loss": inverse_loss_total,
+            "KL_loss": kl_loss_total
         }
 
 
@@ -80,7 +92,7 @@ def train_elbo(
     trainData,
     num_epochs=1000,
     lr=5e-4,
-    device="cuda",
+    device="cpu",
 ):
     """_summary_
 
@@ -112,10 +124,14 @@ def train_elbo(
         out = model(X_seq, U_seq)
 
         loss = out["loss"]
+        reconstruction_loss = out["reconstruction_loss"]
+        inverse_loss = out["inverse_loss"]
+        kl_loss = out["KL_loss"]
         loss.backward()
         optimizer.step()
 
-        print(f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] " f"Loss: {loss.item():.6f}")
+        print(f"Epoch [{epoch + 1:04d}/{num_epochs:04d}] " f"Loss: {loss.item():.6f} | Loss_re: {reconstruction_loss.item():.6f} | Loss_inv: {inverse_loss.item():.6f} | Loss_kl: {kl_loss.item():.6f}")
+        
     return model
 
 
