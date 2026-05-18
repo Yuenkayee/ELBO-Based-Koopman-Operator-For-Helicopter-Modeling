@@ -80,7 +80,7 @@ def train_elbo(
     trainData,
     num_epochs=1000,
     lr=5e-4,
-    device="cpu",
+    device="cuda",
 ):
     """_summary_
 
