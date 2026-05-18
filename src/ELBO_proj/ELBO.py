@@ -91,7 +91,7 @@ class ELBO(nn.Module):
 def train_elbo(
     model,
     trainData,
-    num_epochs=5,
+    num_epochs=3500,
     lr=5e-4,
     device="cuda",
 ):
