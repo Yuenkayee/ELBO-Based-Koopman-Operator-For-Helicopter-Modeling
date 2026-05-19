@@ -65,7 +65,7 @@ class ELBO(nn.Module):
             eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
             reconstruction_loss = F.mse_loss(X_hat_j, X_j)
             inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
-            kl_loss = kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre)
+            kl_loss = kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre) / ((self.T + 1) * self.z_dim)
 
             loss_total = loss_total + reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
             reconstruction_loss_total += reconstruction_loss
