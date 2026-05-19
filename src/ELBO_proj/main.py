@@ -59,7 +59,7 @@ def main():
     model = train_elbo(
         model=model,
         trainData=trainData,
-        num_epochs=1000,
+        num_epochs=2000,
         lr=5e-4,
         device="cuda",
     )
