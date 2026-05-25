@@ -16,8 +16,8 @@ def main():
     z_dim = 48
     h_dim = 48
     embed_dim = 32
-    para_mu = 1000.0
-    para_lambda = 1.2
+    para_mu = 10.0
+    para_lambda = 0.0001
 
     _, U_seq_dim = trainData.U_seq.shape
     if (U_seq_dim - x_dim) % u_dim != 0:
