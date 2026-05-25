@@ -60,7 +60,7 @@ class ELBO(nn.Module):
             mu_after, cov_after = self.nn_after(X_j, U_j, self.nn_A)
             Z_j = reparameterize_full_cov(mu_after, cov_after, self.z_dim, self.T)
             mu_pre, cov_pre = self.nn_pre(Z_j, U_j, self.nn_Wc, self.nn_A, self.nn_B)
-            X_hat_j = decoder(mu_pre, self.nn_C, self.T, self.x_dim, self.z_dim)
+            X_hat_j = decoder(mu_after, self.nn_C, self.T, self.x_dim, self.z_dim)
 
             eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
             reconstruction_loss = F.mse_loss(X_hat_j, X_j)
