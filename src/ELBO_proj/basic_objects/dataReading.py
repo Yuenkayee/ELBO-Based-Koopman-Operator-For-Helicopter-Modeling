@@ -20,7 +20,7 @@ def load_matlab_simulation_data(
     从 ../data/orinigalData.mat 中读取 S 组仿真数据，并构造 trainData。
 
     每组数据要求：
-        simu_result_i.shape == [T + 1, x_dim]
+        simu_refResult_i.shape == [T + 1, x_dim]
         simu_input_i.shape  == [T, u_dim]
 
     返回：
@@ -36,17 +36,17 @@ def load_matlab_simulation_data(
 
     if S is None:
         S = 0
-        while f"simu_result_{S + 1}" in mat_data:
+        while f"simu_refResult_{S + 1}" in mat_data:
             S += 1
 
         if S == 0:
-            raise ValueError("没有在 .mat 文件中找到 simu_result_i 数据。")
+            raise ValueError("没有在 .mat 文件中找到 simu_refResult_i 数据。")
 
     X_seq_list = []
     U_seq_list = []
 
     for i in range(1, S + 1):
-        x_key = f"simu_result_{i}"
+        x_key = f"simu_refResult_{i}"
         u_key = f"simu_input_{i}"
 
         if x_key not in mat_data:
