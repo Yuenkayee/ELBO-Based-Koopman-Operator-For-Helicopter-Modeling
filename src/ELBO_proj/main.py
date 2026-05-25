@@ -13,9 +13,9 @@ def main():
 
     x_dim = 12
     u_dim = 4
-    z_dim = 24
-    h_dim = 16
-    embed_dim = 16
+    z_dim = 48
+    h_dim = 48
+    embed_dim = 32
     para_mu = 1000.0
     para_lambda = 1.2
 
