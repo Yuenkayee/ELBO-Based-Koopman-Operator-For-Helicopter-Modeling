@@ -6,34 +6,73 @@ import torch.nn as nn
 # ============================================================
 
 
-def reparameterize_full_cov(mu, cov, z_dim, T, eps=1e-6):
+# def reparameterize_full_cov(mu, cov, z_dim, T, eps=1e-6):
 
+#     """
+
+#     mu:  shape [z_dim * (T + 1)]
+
+#     cov: shape [z_dim * (T + 1), z_dim * (T + 1)]
+
+#     return:
+
+#         Z: shape [T + 1, z_dim]
+
+#     """
+
+#     n = z_dim * (T + 1)
+#     assert mu.shape == (n,)
+#     assert cov.shape == (n, n)
+#     # 为了数值稳定，给协方差矩阵加一个很小的对角项
+#     cov_stable = cov + eps * torch.eye(n, device=cov.device, dtype=cov.dtype)
+#     # Cholesky 分解：cov = L @ L.T
+#     L = torch.linalg.cholesky(cov_stable)
+#     # 从标准正态分布采样
+#     epsilon = torch.randn(n, device=mu.device, dtype=mu.dtype)
+#     # 重参数化采样
+#     Z_vec = mu + L @ epsilon
+#     # reshape 成时间序列形式
+#     Z = Z_vec.reshape(T + 1, z_dim)
+#     return Z
+
+"""
+    这里强制为协方差矩阵添加了一个噪声对角项以及正定化, 可以防止矩阵出现奇异性问题或者不严格镇定
+"""
+def reparameterize_full_cov(mu, cov, z_dim, T):
+    """
+    mu.shape  == [(T + 1) * z_dim]
+    cov.shape == [(T + 1) * z_dim, (T + 1) * z_dim]
     """
 
-    mu:  shape [z_dim * (T + 1)]
+    dim = mu.shape[0]
 
-    cov: shape [z_dim * (T + 1), z_dim * (T + 1)]
+    # 先强制对称，避免数值误差导致 cov != cov.T
+    cov = 0.5 * (cov + cov.T)
 
-    return:
+    eye = torch.eye(dim, device=cov.device, dtype=cov.dtype)
 
-        Z: shape [T + 1, z_dim]
+    # 自适应增加 jitter，直到 Cholesky 成功
+    jitter = 1e-6
+    max_tries = 4
 
-    """
+    for _ in range(max_tries):
+        try:
+            cov_stable = cov + jitter * eye
+            L = torch.linalg.cholesky(cov_stable)
+            eps = torch.randn(dim, device=mu.device, dtype=mu.dtype)
+            return mu + L @ eps
+        except torch._C._LinAlgError:
+            jitter *= 10.0
 
-    n = z_dim * (T + 1)
-    assert mu.shape == (n,)
-    assert cov.shape == (n, n)
-    # 为了数值稳定，给协方差矩阵加一个很小的对角项
-    cov_stable = cov + eps * torch.eye(n, device=cov.device, dtype=cov.dtype)
-    # Cholesky 分解：cov = L @ L.T
+    # 如果仍然失败，使用特征值截断作为兜底方案
+    eigvals, eigvecs = torch.linalg.eigh(cov)
+    eigvals = torch.clamp(eigvals, min=jitter)
+    cov_stable = eigvecs @ torch.diag(eigvals) @ eigvecs.T
+
     L = torch.linalg.cholesky(cov_stable)
-    # 从标准正态分布采样
-    epsilon = torch.randn(n, device=mu.device, dtype=mu.dtype)
-    # 重参数化采样
-    Z_vec = mu + L @ epsilon
-    # reshape 成时间序列形式
-    Z = Z_vec.reshape(T + 1, z_dim)
-    return Z
+    eps = torch.randn(dim, device=mu.device, dtype=mu.dtype)
+
+    return mu + L @ eps
 
 def decoder(Z_j, nn_C, T, x_dim, z_dim):
     """
