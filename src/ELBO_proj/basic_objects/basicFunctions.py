@@ -35,44 +35,74 @@ import torch.nn as nn
 #     Z = Z_vec.reshape(T + 1, z_dim)
 #     return Z
 
-"""
-    这里强制为协方差矩阵添加了一个噪声对角项以及正定化, 可以防止矩阵出现奇异性问题或者不严格镇定
-"""
-def reparameterize_full_cov(mu, cov, z_dim, T):
+
+def reparameterize_full_cov(mu, cov, z_dim, T, eps=1e-4):
     """
+    Reparameterization sampling for a full-covariance Gaussian distribution.
+
     mu.shape  == [(T + 1) * z_dim]
     cov.shape == [(T + 1) * z_dim, (T + 1) * z_dim]
+
+    return:
+        Z_vec.shape == [(T + 1) * z_dim]
+
+    Notes:
+        The covariance matrix produced during training can be only positive
+        semi-definite or slightly non-symmetric due to numerical errors. This
+        function first symmetrizes the covariance matrix and then adaptively
+        adds diagonal jitter. If Cholesky still fails, it falls back to
+        eigenvalue clipping and retries Cholesky with extra jitter.
     """
 
     dim = mu.shape[0]
-
-    # 先强制对称，避免数值误差导致 cov != cov.T
-    cov = 0.5 * (cov + cov.T)
+    expected_dim = z_dim * (T + 1)
+    if dim != expected_dim:
+        raise ValueError(
+            f"mu.shape[0] should be (T + 1) * z_dim={expected_dim}, "
+            f"but got {dim}"
+        )
+    if cov.shape != (dim, dim):
+        raise ValueError(f"cov should have shape [{dim}, {dim}], but got {cov.shape}")
 
     eye = torch.eye(dim, device=cov.device, dtype=cov.dtype)
 
-    # 自适应增加 jitter，直到 Cholesky 成功
-    jitter = 1e-6
-    max_tries = 4
+    # 强制对称，避免数值误差导致 cov != cov.T。
+    cov = 0.5 * (cov + cov.T)
 
+    # 先尝试自适应 jitter。
+    jitter = eps
+    max_tries = 3
     for _ in range(max_tries):
+        cov_stable = cov + jitter * eye
         try:
-            cov_stable = cov + jitter * eye
             L = torch.linalg.cholesky(cov_stable)
-            eps = torch.randn(dim, device=mu.device, dtype=mu.dtype)
-            return mu + L @ eps
+            eps_sample = torch.randn(dim, device=mu.device, dtype=mu.dtype)
+            return mu + L @ eps_sample
         except torch._C._LinAlgError:
             jitter *= 10.0
 
-    # 如果仍然失败，使用特征值截断作为兜底方案
+    # 兜底方案：特征值截断。注意特征值截断后仍需重新对称并加 jitter。
     eigvals, eigvecs = torch.linalg.eigh(cov)
-    eigvals = torch.clamp(eigvals, min=jitter)
-    cov_stable = eigvecs @ torch.diag(eigvals) @ eigvecs.T
+    min_eig = torch.clamp(eigvals.min(), max=0.0)
+    eigvals_clamped = torch.clamp(eigvals, min=eps)
+    cov_stable = eigvecs @ torch.diag(eigvals_clamped) @ eigvecs.T
+    cov_stable = 0.5 * (cov_stable + cov_stable.T)
 
-    L = torch.linalg.cholesky(cov_stable)
-    eps = torch.randn(dim, device=mu.device, dtype=mu.dtype)
+    # 对特征值截断后的矩阵再次使用 Cholesky + jitter，避免重构误差导致失败。
+    jitter = max(float(eps), float((-min_eig).detach().cpu()) + float(eps))
+    for _ in range(max_tries):
+        try:
+            L = torch.linalg.cholesky(cov_stable + jitter * eye)
+            eps_sample = torch.randn(dim, device=mu.device, dtype=mu.dtype)
+            return mu + L @ eps_sample
+        except torch._C._LinAlgError:
+            jitter *= 10.0
 
-    return mu + L @ eps
+    raise RuntimeError(
+        "reparameterize_full_cov failed: covariance matrix cannot be made "
+        "positive-definite even after adaptive jitter and eigenvalue clipping. "
+        "Try increasing process_noise_scale or reducing z_dim/T."
+    )
 
 def decoder(Z_j, nn_C, T, x_dim, z_dim):
     """
