@@ -112,28 +112,26 @@ def decoder(Z_j, nn_C, T, x_dim, z_dim):
 
     return X_hat_mat.reshape(T * x_dim)
 
-def kl_divergence_gaussian(mu_1, cov_1, mu_2, cov_2, eps=1e-6):
-
+def kl_divergence_gaussian(mu_1, cov_1, mu_2, cov_2, eps=1e-4):
     """
-
     Compute KL(N1 || N2) for two multivariate Gaussian distributions.
 
     N1 = N(mu_1, cov_1)
-
     N2 = N(mu_2, cov_2)
 
     mu_1:  shape [Z_dim]
-
     cov_1: shape [Z_dim, Z_dim]
-
     mu_2:  shape [Z_dim]
-
     cov_2: shape [Z_dim, Z_dim]
 
     return:
-
         scalar KL divergence
 
+    Notes:
+        This implementation uses stronger numerical stabilization than the
+        direct formula with torch.logdet and torch.linalg.solve. It first
+        symmetrizes covariance matrices, then adaptively adds diagonal jitter
+        until Cholesky decomposition succeeds.
     """
 
     Z_dim = mu_1.shape[0]
@@ -142,40 +140,58 @@ def kl_divergence_gaussian(mu_1, cov_1, mu_2, cov_2, eps=1e-6):
     assert cov_1.shape == (Z_dim, Z_dim)
     assert cov_2.shape == (Z_dim, Z_dim)
 
-    # 数值稳定：给协方差矩阵加一个很小的对角项
-
     eye = torch.eye(Z_dim, device=mu_1.device, dtype=mu_1.dtype)
-    cov_1 = cov_1 + eps * eye
-    cov_2 = cov_2 + eps * eye
 
-    # 均值差
+    def make_cholesky_stable(cov, name):
+        # 强制对称，避免数值误差导致 cov != cov.T。
+        cov = 0.5 * (cov + cov.T)
+
+        jitter = eps
+        max_tries = 8
+
+        for _ in range(max_tries):
+            cov_stable = cov + jitter * eye
+            try:
+                L = torch.linalg.cholesky(cov_stable)
+                return cov_stable, L, jitter
+            except torch._C._LinAlgError:
+                jitter *= 10.0
+
+        # 兜底方案：通过特征值截断强制正定。
+        eigvals, eigvecs = torch.linalg.eigh(cov)
+        eigvals = torch.clamp(eigvals, min=jitter)
+        cov_stable = eigvecs @ torch.diag(eigvals) @ eigvecs.T
+        cov_stable = 0.5 * (cov_stable + cov_stable.T) + jitter * eye
+        L = torch.linalg.cholesky(cov_stable)
+        return cov_stable, L, jitter
+
+    cov_1, L_1, _ = make_cholesky_stable(cov_1, "cov_1")
+    cov_2, L_2, _ = make_cholesky_stable(cov_2, "cov_2")
 
     diff = mu_2 - mu_1
-    # log |cov_2| - log |cov_1|
 
-    logdet_cov_1 = torch.logdet(cov_1)
-    logdet_cov_2 = torch.logdet(cov_2)
+    # log |cov| = 2 * sum(log(diag(L)))，比 torch.logdet 更稳定。
+    logdet_cov_1 = 2.0 * torch.sum(torch.log(torch.diagonal(L_1)))
+    logdet_cov_2 = 2.0 * torch.sum(torch.log(torch.diagonal(L_2)))
 
-    # cov_2^{-1} cov_1
-
-    cov_2_inv_cov_1 = torch.linalg.solve(cov_2, cov_1)
+    # cov_2^{-1} cov_1，用 cholesky_solve 避免显式求逆。
+    cov_2_inv_cov_1 = torch.cholesky_solve(cov_1, L_2)
     trace_term = torch.trace(cov_2_inv_cov_1)
 
     # (mu_2 - mu_1)^T cov_2^{-1} (mu_2 - mu_1)
+    diff_col = diff.unsqueeze(1)
+    cov_2_inv_diff = torch.cholesky_solve(diff_col, L_2).squeeze(1)
+    mahalanobis_term = diff @ cov_2_inv_diff
 
-    mahalanobis_term = diff @ torch.linalg.solve(cov_2, diff)
     kl = 0.5 * (
-
         logdet_cov_2
-
         - logdet_cov_1
-
         - Z_dim
-
         + trace_term
-
         + mahalanobis_term
-
     )
+
+    # 数值误差可能导致极小负数，这里截断为非负。
+    kl = torch.clamp(kl, min=0.0)
 
     return kl
