@@ -13,6 +13,7 @@ class afterDistirbution(nn.Module):
         self.Z_dim = (T + 1) * z_dim
         self.U_dim = x_dim + T * u_dim
         self.X_dim = T * x_dim
+        self.process_noise_scale = 1e-4
 
         # mu, cov, and I_seq are constructed in forward(), so that they are
         # placed on the same device and use the same dtype as the input data.
@@ -75,24 +76,43 @@ class afterDistirbution(nn.Module):
         return I_seq
 
     """_函数说明_
-        这计算后验分布中, 隐变量 Z 的由矩阵块构成的协方差矩阵，考虑到 Z 的各子项z_t之间存在强相关性,
-    因此协方差矩阵除了次对角线矩阵块不为零外, 主对角线的矩阵块还满足分布 Sigma_tt = A * Sigma_tt * A^T
-    这里的矩阵 A 是一个待训练的参数，通过前面的网络获得
+        计算后验分布中隐变量 Z = [z_0, z_1, ..., z_T] 的块协方差矩阵。
+        当前假设隐空间动力学满足：
+            z_{t+1} = A z_t + w_t,   w_t ~ N(0, Q)
+        其中 Q = process_noise_scale * I。
+
+        因此主对角块递推为：
+            Sigma_{0,0} = Sigma_00
+            Sigma_{t,t} = A Sigma_{t-1,t-1} A^T + Q,  t >= 1
+
+        非对角块递推为：
+            Sigma_{i,j} = Sigma_{i,j-1} A^T,          j > i
+            Sigma_{j,i} = Sigma_{i,j}^T
+        其中过程噪声只影响其注入时刻之后的主对角块，并通过后续 A 传播到更晚时刻的互协方差。
     """
 
     def fullfill_cov_blocks(self, A, Sigma_00):
         cov = Sigma_00.new_zeros(self.Z_dim, self.Z_dim)
+        Q = self.process_noise_scale * torch.eye(
+            self.z_dim,
+            device=Sigma_00.device,
+            dtype=Sigma_00.dtype,
+        )
 
-        Sigma_ii = Sigma_00
+        diag_blocks = []
+        Sigma_tt = Sigma_00
+        diag_blocks.append(Sigma_tt)
+
+        for t in range(1, self.T + 1):
+            Sigma_tt = A @ Sigma_tt @ A.T + Q
+            Sigma_tt = 0.5 * (Sigma_tt + Sigma_tt.T)
+            diag_blocks.append(Sigma_tt)
 
         for i in range(0, self.T + 1):
-            if i == 0:
-                Sigma_ii = Sigma_00
-            else:
-                Sigma_ii = A @ Sigma_ii @ A.T
-
             row_i_start = i * self.z_dim
             row_i_end = (i + 1) * self.z_dim
+
+            Sigma_ii = diag_blocks[i]
             cov[row_i_start:row_i_end, row_i_start:row_i_end] = Sigma_ii
 
             Sigma_ij = Sigma_ii
@@ -102,9 +122,8 @@ class afterDistirbution(nn.Module):
                 col_j_start = j * self.z_dim
                 col_j_end = (j + 1) * self.z_dim
 
-                # Sigma_ij = Cov(z_i, z_j)
                 cov[row_i_start:row_i_end, col_j_start:col_j_end] = Sigma_ij
-                # Sigma_ji = Cov(z_j, z_i) = Sigma_ij.T
                 cov[col_j_start:col_j_end, row_i_start:row_i_end] = Sigma_ij.T
 
+        cov = 0.5 * (cov + cov.T)
         return cov
