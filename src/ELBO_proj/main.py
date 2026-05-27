@@ -18,6 +18,7 @@ def main():
     embed_dim = 32
     para_mu = 10.0
     para_lambda = 0.01
+    batch_size = 4
 
     _, U_seq_dim = trainData.U_seq.shape
     if (U_seq_dim - x_dim) % u_dim != 0:
@@ -66,6 +67,7 @@ def main():
         num_epochs=100,
         lr=5e-4,
         device="cuda",
+        batch_size=batch_size,
     )
 
     checkpoint_dir = os.path.dirname(checkpoint_path)
@@ -83,6 +85,7 @@ def main():
             "T": T,
             "para_mu": para_mu,
             "para_lambda": para_lambda,
+            "batch_size": batch_size,
         },
         checkpoint_path,
     )

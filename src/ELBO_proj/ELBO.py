@@ -47,51 +47,66 @@ class ELBO(nn.Module):
     """
 
     def forward(self, X_seq, U_seq):
-        S, _ = X_seq.shape
-        loss_total = X_seq.new_tensor(0.0)
-        reconstruction_loss_total = X_seq.new_tensor(0.0)
-        inverse_loss_total = X_seq.new_tensor(0.0)
-        kl_loss_total = X_seq.new_tensor(0.0)
+        """
+        Forward computation for one mini-batch.
 
-        for j in range(S):
-            X_j = X_seq[j]
-            U_j = U_seq[j]
+        Input:
+            X_seq.shape == [B, T * x_dim]
+            U_seq.shape == [B, x_dim + T * u_dim]
 
-            mu_after, cov_after = self.nn_after(X_j, U_j, self.nn_A)
-            Z_j = reparameterize_block_diag(mu_after, cov_after, self.T, self.z_dim)
-            mu_pre, cov_pre = self.nn_pre(Z_j, U_j, self.nn_Wc, self.nn_A, self.nn_B)
-            X_hat_j = decoder(mu_after, self.nn_C, self.T, self.x_dim, self.z_dim)
+        Output:
+            A dictionary containing averaged mini-batch losses.
+        """
+        if X_seq.ndim == 1:
+            X_seq = X_seq.unsqueeze(0)
+            U_seq = U_seq.unsqueeze(0)
+        elif X_seq.ndim != 2:
+            raise ValueError(f"X_seq should be 1D or 2D, but got shape {X_seq.shape}")
 
-            eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
-            reconstruction_loss = F.mse_loss(X_hat_j, X_j)
-            inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
-            kl_loss = kl_divergence_block_diag_gaussian(
-                mu_after,
-                cov_after,
-                mu_pre,
-                cov_pre,
-                self.T,
-                self.z_dim,
-            ) / ((self.T + 1) * self.z_dim)
+        if U_seq.ndim != 2:
+            raise ValueError(f"U_seq should be 2D after possible unsqueeze, but got shape {U_seq.shape}")
+        if X_seq.shape[0] != U_seq.shape[0]:
+            raise ValueError(
+                f"X_seq and U_seq should have the same batch size, "
+                f"but got {X_seq.shape[0]} and {U_seq.shape[0]}"
+            )
+        if X_seq.shape[1] != self.T * self.x_dim:
+            raise ValueError(
+                f"X_seq should have shape [B, {self.T * self.x_dim}], but got {X_seq.shape}"
+            )
+        if U_seq.shape[1] != self.x_dim + self.T * self.u_dim:
+            raise ValueError(
+                f"U_seq should have shape [B, {self.x_dim + self.T * self.u_dim}], "
+                f"but got {U_seq.shape}"
+            )
 
-            loss_total = loss_total + reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
-            reconstruction_loss_total += reconstruction_loss
-            inverse_loss_total += inverse_loss
-            kl_loss_total += kl_loss
+        mu_after, cov_after = self.nn_after(X_seq, U_seq, self.nn_A)
+        Z_seq = reparameterize_block_diag(mu_after, cov_after, self.T, self.z_dim)
+        mu_pre, cov_pre = self.nn_pre(Z_seq, U_seq, self.nn_Wc, self.nn_A, self.nn_B)
+        X_hat = decoder(mu_after, self.nn_C, self.T, self.x_dim, self.z_dim)
 
-        loss_total = loss_total / S
-        reconstruction_loss_total = reconstruction_loss_total / S
-        inverse_loss_total = inverse_loss_total / S
-        kl_loss_total = kl_loss_total / S
+        eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
+        reconstruction_loss = F.mse_loss(X_hat, X_seq)
+        inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
+        kl_loss = kl_divergence_block_diag_gaussian(
+            mu_after,
+            cov_after,
+            mu_pre,
+            cov_pre,
+            self.T,
+            self.z_dim,
+        ) / ((self.T + 1) * self.z_dim)
+
+        loss = reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
 
         return {
             "A": self.nn_A.weight,
             "B": self.nn_B.weight,
             "C": self.nn_C.weight,
-            "loss": loss_total,
-            "reconstruction_loss": reconstruction_loss_total,
-            "inverse_loss": inverse_loss_total,
-            "KL_loss": kl_loss_total
+            "loss": loss,
+            "reconstruction_loss": reconstruction_loss,
+            "inverse_loss": inverse_loss,
+            "KL_loss": kl_loss,
         }
 
 
@@ -101,6 +116,7 @@ def train_elbo(
     num_epochs=50,
     lr=5e-4,
     device="cuda",
+    batch_size=4,
 ):
     """_summary_
 
@@ -110,6 +126,7 @@ def train_elbo(
         num_epochs (int, optional): Defaults to 1000.
         lr (_type_, optional): Defaults to 5e-4.
         device (str, optional): Defaults to None. If None, automatically selects cuda, mps, or cpu.
+        batch_size (int, optional): Number of trajectories in one mini-batch. Defaults to 4.
     """
     if device is None:
         if torch.cuda.is_available():
@@ -129,20 +146,42 @@ def train_elbo(
             torch.cuda.reset_peak_memory_stats(device)
 
         model.train()
-        X_seq = trainData.X_seq
-        U_seq = trainData.U_seq
-        X_seq = X_seq.to(device)
-        U_seq = U_seq.to(device)
+        X_all = trainData.X_seq
+        U_all = trainData.U_seq
+        S = X_all.shape[0]
+        perm = torch.randperm(S)
 
-        optimizer.zero_grad()
-        out = model(X_seq, U_seq)
+        epoch_loss = 0.0
+        epoch_reconstruction_loss = 0.0
+        epoch_inverse_loss = 0.0
+        epoch_kl_loss = 0.0
 
-        loss = out["loss"]
-        reconstruction_loss = out["reconstruction_loss"]
-        inverse_loss = out["inverse_loss"]
-        kl_loss = out["KL_loss"]
-        loss.backward()
-        optimizer.step()
+        for start in range(0, S, batch_size):
+            idx = perm[start : start + batch_size]
+            X_batch = X_all[idx].to(device)
+            U_batch = U_all[idx].to(device)
+            current_batch_size = X_batch.shape[0]
+
+            optimizer.zero_grad()
+            out = model(X_batch, U_batch)
+
+            loss = out["loss"]
+            reconstruction_loss = out["reconstruction_loss"]
+            inverse_loss = out["inverse_loss"]
+            kl_loss = out["KL_loss"]
+
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * current_batch_size
+            epoch_reconstruction_loss += reconstruction_loss.item() * current_batch_size
+            epoch_inverse_loss += inverse_loss.item() * current_batch_size
+            epoch_kl_loss += kl_loss.item() * current_batch_size
+
+        loss = X_all.new_tensor(epoch_loss / S)
+        reconstruction_loss = X_all.new_tensor(epoch_reconstruction_loss / S)
+        inverse_loss = X_all.new_tensor(epoch_inverse_loss / S)
+        kl_loss = X_all.new_tensor(epoch_kl_loss / S)
 
         if str(device).startswith("cuda"):
             torch.cuda.synchronize(device)
