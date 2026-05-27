@@ -8,9 +8,9 @@ import scipy.io as sio
 from basic_objects.dataReading import load_matlab_simulation_data
 from basic_objects.afterDistribution import afterDistirbution
 from basic_objects.preDistribution import ConditionalPN
-from basic_objects.basicFunctions import reparameterize_full_cov
 from basic_objects.basicFunctions import decoder
-from basic_objects.basicFunctions import kl_divergence_gaussian
+from basic_objects.basicFunctions import kl_divergence_block_diag_gaussian
+from basic_objects.basicFunctions import reparameterize_block_diag
 
 
 class ELBO(nn.Module):
@@ -58,14 +58,21 @@ class ELBO(nn.Module):
             U_j = U_seq[j]
 
             mu_after, cov_after = self.nn_after(X_j, U_j, self.nn_A)
-            Z_j = reparameterize_full_cov(mu_after, cov_after, self.z_dim, self.T)
+            Z_j = reparameterize_block_diag(mu_after, cov_after, self.T, self.z_dim)
             mu_pre, cov_pre = self.nn_pre(Z_j, U_j, self.nn_Wc, self.nn_A, self.nn_B)
             X_hat_j = decoder(mu_after, self.nn_C, self.T, self.x_dim, self.z_dim)
 
             eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
             reconstruction_loss = F.mse_loss(X_hat_j, X_j)
             inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
-            kl_loss = kl_divergence_gaussian(mu_after, cov_after, mu_pre, cov_pre) / ((self.T + 1) * self.z_dim)
+            kl_loss = kl_divergence_block_diag_gaussian(
+                mu_after,
+                cov_after,
+                mu_pre,
+                cov_pre,
+                self.T,
+                self.z_dim,
+            ) / ((self.T + 1) * self.z_dim)
 
             loss_total = loss_total + reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
             reconstruction_loss_total += reconstruction_loss

@@ -140,3 +140,131 @@ def kl_divergence_gaussian(mu_1, cov_1, mu_2, cov_2, eps=1e-6):
     )
 
     return kl
+
+
+"""
+    下面是用于 edge_block 方案的函数
+"""
+
+def _mu_to_mat(mu, T, z_dim):
+    """
+    Convert mu to shape [T + 1, z_dim].
+    Accepted input shapes:
+        [(T + 1) * z_dim]
+        [T + 1, z_dim]
+    """
+    if mu.ndim == 1:
+        return mu.reshape(T + 1, z_dim)
+    if mu.ndim == 2 and mu.shape == (T + 1, z_dim):
+        return mu
+    raise ValueError(
+        f"mu should have shape [{(T + 1) * z_dim}] or [{T + 1}, {z_dim}], "
+        f"but got {mu.shape}"
+    )
+
+
+def _cov_to_block(cov, T, z_dim):
+    """
+    Convert covariance to block-diagonal form [T + 1, z_dim, z_dim].
+
+    Preferred input shape:
+        [T + 1, z_dim, z_dim]
+
+    For compatibility, if a full covariance matrix with shape
+        [(T + 1) * z_dim, (T + 1) * z_dim]
+    is passed in, only its diagonal blocks are extracted.
+    """
+    if cov.ndim == 3 and cov.shape == (T + 1, z_dim, z_dim):
+        return cov
+
+    Z_dim = (T + 1) * z_dim
+    if cov.ndim == 2 and cov.shape == (Z_dim, Z_dim):
+        blocks = []
+        for t in range(T + 1):
+            row_start = t * z_dim
+            row_end = (t + 1) * z_dim
+            blocks.append(cov[row_start:row_end, row_start:row_end])
+        return torch.stack(blocks, dim=0)
+
+    raise ValueError(
+        f"cov should have shape [{T + 1}, {z_dim}, {z_dim}] or [{Z_dim}, {Z_dim}], "
+        f"but got {cov.shape}"
+    )
+
+
+def _make_block_spd(cov_blocks, eps=1e-4):
+    """
+    Stabilize block covariance matrices.
+    Input and output shape: [T + 1, z_dim, z_dim].
+    """
+    T_plus_1, z_dim, _ = cov_blocks.shape
+    eye = torch.eye(z_dim, device=cov_blocks.device, dtype=cov_blocks.dtype)
+    cov_blocks = 0.5 * (cov_blocks + cov_blocks.transpose(-1, -2))
+    return cov_blocks + eps * eye.unsqueeze(0).expand(T_plus_1, -1, -1)
+
+
+def reparameterize_block_diag(mu, cov_blocks, T, z_dim, eps=1e-4):
+    """
+    Reparameterization for block-diagonal Gaussian covariance.
+
+    mu:         [(T + 1) * z_dim] or [T + 1, z_dim]
+    cov_blocks: [T + 1, z_dim, z_dim]
+
+    return:
+        Z_vec: [(T + 1) * z_dim]
+    """
+    mu_mat = _mu_to_mat(mu, T, z_dim)
+    cov_blocks = _cov_to_block(cov_blocks, T, z_dim)
+    cov_blocks = _make_block_spd(cov_blocks, eps=eps)
+
+    L = torch.linalg.cholesky(cov_blocks)
+    eps_sample = torch.randn_like(mu_mat).unsqueeze(-1)
+    Z_mat = mu_mat + torch.matmul(L, eps_sample).squeeze(-1)
+
+    return Z_mat.reshape(-1)
+
+
+def kl_divergence_block_diag_gaussian(mu_q, cov_q, mu_p, cov_p, T, z_dim, eps=1e-4):
+    """
+    Compute KL(q || p) for block-diagonal multivariate Gaussian distributions.
+
+    q = N(mu_q, cov_q), p = N(mu_p, cov_p)
+
+    mu_q, mu_p:
+        [(T + 1) * z_dim] or [T + 1, z_dim]
+    cov_q, cov_p:
+        [T + 1, z_dim, z_dim]
+
+    return:
+        scalar KL divergence, summed over all time-step blocks.
+    """
+    mu_q = _mu_to_mat(mu_q, T, z_dim)
+    mu_p = _mu_to_mat(mu_p, T, z_dim)
+    cov_q = _cov_to_block(cov_q, T, z_dim)
+    cov_p = _cov_to_block(cov_p, T, z_dim)
+
+    cov_q = _make_block_spd(cov_q, eps=eps)
+    cov_p = _make_block_spd(cov_p, eps=eps)
+
+    L_q = torch.linalg.cholesky(cov_q)
+    L_p = torch.linalg.cholesky(cov_p)
+
+    logdet_q = 2.0 * torch.sum(torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1)), dim=-1)
+    logdet_p = 2.0 * torch.sum(torch.log(torch.diagonal(L_p, dim1=-2, dim2=-1)), dim=-1)
+
+    cov_p_inv_cov_q = torch.cholesky_solve(cov_q, L_p)
+    trace_term = torch.diagonal(cov_p_inv_cov_q, dim1=-2, dim2=-1).sum(dim=-1)
+
+    diff = (mu_p - mu_q).unsqueeze(-1)
+    cov_p_inv_diff = torch.cholesky_solve(diff, L_p)
+    mahalanobis_term = torch.matmul(diff.transpose(-1, -2), cov_p_inv_diff).squeeze(-1).squeeze(-1)
+
+    kl_per_block = 0.5 * (
+        logdet_p
+        - logdet_q
+        - z_dim
+        + trace_term
+        + mahalanobis_term
+    )
+
+    return torch.clamp(kl_per_block.sum(), min=0.0)

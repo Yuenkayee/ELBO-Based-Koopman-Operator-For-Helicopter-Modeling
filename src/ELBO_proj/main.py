@@ -11,13 +11,13 @@ from basic_objects.dataReading import load_matlab_simulation_data
 def main():
     trainData = load_matlab_simulation_data()
 
-    x_dim = 12
+    x_dim = 9
     u_dim = 4
-    z_dim = 48
+    z_dim = 24
     h_dim = 48
     embed_dim = 32
     para_mu = 10.0
-    para_lambda = 0.0001
+    para_lambda = 0.01
 
     _, U_seq_dim = trainData.U_seq.shape
     if (U_seq_dim - x_dim) % u_dim != 0:
@@ -47,12 +47,16 @@ def main():
     )
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    checkpoint_path = os.path.join(current_dir, "data", "elbo_model_checkpoint.pt")
+    checkpoint_path = os.path.join(current_dir, "data", "elbo_model_blockdiag_checkpoint.pt")
 
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state_dict"])
-        print(f"Loaded model checkpoint from: {checkpoint_path}")
+        try:
+            model.load_state_dict(checkpoint["model_state_dict"])
+            print(f"Loaded model checkpoint from: {checkpoint_path}")
+        except RuntimeError as err:
+            print("Checkpoint is incompatible with the current model structure.")
+            print(f"Skip loading checkpoint and train from scratch. Error: {err}")
     else:
         print("No checkpoint found. Train from scratch.")
 
