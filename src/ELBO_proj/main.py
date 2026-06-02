@@ -13,12 +13,12 @@ def main():
 
     x_dim = 12
     u_dim = 4
-    z_dim = 128
-    h_dim = 128
-    embed_dim = 128
+    z_dim = 36
+    h_dim = 36
+    embed_dim = 36
     para_mu = 1.0
     para_lambda = 0.1
-    batch_size = 250
+    batch_size = 500
 
     _, U_seq_dim = trainData.U_seq.shape
     if (U_seq_dim - x_dim) % u_dim != 0:
@@ -64,8 +64,8 @@ def main():
     model = train_elbo(
         model=model,
         trainData=trainData,
-        num_epochs=50,
-        lr=5e-4,
+        num_epochs=200,
+        lr=1e-4,
         device="cuda",
         batch_size=batch_size,
     )
