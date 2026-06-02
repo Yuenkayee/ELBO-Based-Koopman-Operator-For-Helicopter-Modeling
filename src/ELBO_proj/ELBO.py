@@ -170,8 +170,8 @@ def train_elbo(
             inverse_loss = out["inverse_loss"]
             kl_loss = out["KL_loss"]
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             epoch_loss += loss.item() * current_batch_size
