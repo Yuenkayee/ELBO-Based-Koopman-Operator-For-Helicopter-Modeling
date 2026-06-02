@@ -291,9 +291,13 @@ def _safe_block_cholesky(cov_blocks, eps=1e-4, max_tries=3):
     Return:
         L with the same leading dimensions as cov_blocks.
 
-    This function first tries adaptive diagonal jitter. If the covariance
-    blocks are still not positive-definite, it falls back to eigenvalue
-    clipping block by block.
+    This function avoids using torch.linalg.eigh as a fallback because CUDA
+    eigensolvers can fail with CUSOLVER_STATUS_INVALID_VALUE when the input
+    contains NaN/Inf. Instead, it uses three increasingly robust steps:
+        1. replace NaN/Inf by finite values;
+        2. try adaptive diagonal jitter;
+        3. project each covariance block to a symmetric strictly diagonally
+           dominant matrix, which is positive-definite.
     """
     if cov_blocks.ndim not in (3, 4):
         raise ValueError(
@@ -306,8 +310,12 @@ def _safe_block_cholesky(cov_blocks, eps=1e-4, max_tries=3):
     eye_shape = (1, z_dim, z_dim) if cov_blocks.ndim == 3 else (1, 1, z_dim, z_dim)
     eye = eye.view(*eye_shape)
 
+    # Step 1: remove NaN/Inf before any CUDA linalg operation.
+    cov_blocks = torch.nan_to_num(cov_blocks, nan=0.0, posinf=1e6, neginf=-1e6)
+    cov_blocks = torch.clamp(cov_blocks, min=-1e6, max=1e6)
     cov_blocks = 0.5 * (cov_blocks + cov_blocks.transpose(-1, -2))
 
+    # Step 2: adaptive diagonal jitter.
     jitter = eps
     for _ in range(max_tries):
         try:
@@ -315,24 +323,36 @@ def _safe_block_cholesky(cov_blocks, eps=1e-4, max_tries=3):
         except torch._C._LinAlgError:
             jitter *= 10.0
 
-    # Fallback: eigenvalue clipping. This is slower but much more robust.
-    eigvals, eigvecs = torch.linalg.eigh(cov_blocks)
-    eigvals = torch.clamp(eigvals, min=eps)
-    cov_stable = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-1, -2)
-    cov_stable = 0.5 * (cov_stable + cov_stable.transpose(-1, -2))
+    # Step 3: no eig fallback. Build a strictly diagonally dominant symmetric
+    # matrix. A symmetric matrix with positive diagonal and strict diagonal
+    # dominance is positive-definite.
+    diag = torch.diagonal(cov_blocks, dim1=-2, dim2=-1)
+    abs_cov = torch.abs(cov_blocks)
+    offdiag_abs_sum = abs_cov.sum(dim=-1) - torch.abs(diag)
+    new_diag = torch.abs(diag) + offdiag_abs_sum + eps
+
+    cov_spd = cov_blocks.clone()
+    cov_spd = cov_spd - torch.diag_embed(diag) + torch.diag_embed(new_diag)
+    cov_spd = 0.5 * (cov_spd + cov_spd.transpose(-1, -2))
 
     jitter = eps
     for _ in range(max_tries):
         try:
-            return torch.linalg.cholesky(cov_stable + jitter * eye)
+            return torch.linalg.cholesky(cov_spd + jitter * eye)
         except torch._C._LinAlgError:
             jitter *= 10.0
 
-    raise RuntimeError(
-        "_safe_block_cholesky failed: covariance blocks cannot be made "
-        "positive-definite even after adaptive jitter and eigenvalue clipping. "
-        "Try increasing eps or process_noise_scale."
-    )
+    # Final emergency fallback: use only a positive diagonal covariance block.
+    diag_only = torch.diag_embed(new_diag + jitter)
+    try:
+        return torch.linalg.cholesky(diag_only)
+    except torch._C._LinAlgError as err:
+        raise RuntimeError(
+            "_safe_block_cholesky failed even after NaN/Inf cleanup, "
+            "adaptive jitter, diagonal-dominance projection, and diagonal fallback. "
+            "This usually means the training has already diverged. Try lowering lr, "
+            "reducing z_dim, increasing process_noise_scale, or enabling gradient clipping."
+        ) from err
 
 
 def reparameterize_block_diag(mu, cov_blocks, T, z_dim, eps=1e-4):
