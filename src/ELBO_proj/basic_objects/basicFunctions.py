@@ -277,6 +277,64 @@ def _make_block_spd(cov_blocks, eps=1e-4):
     )
 
 
+# ============================================================
+#  Helper: Stable Cholesky for block covariance matrices
+# ============================================================
+def _safe_block_cholesky(cov_blocks, eps=1e-4, max_tries=3):
+    """
+    Stable Cholesky factorization for block covariance matrices.
+
+    Accepted input shapes:
+        [T + 1, z_dim, z_dim]
+        [B, T + 1, z_dim, z_dim]
+
+    Return:
+        L with the same leading dimensions as cov_blocks.
+
+    This function first tries adaptive diagonal jitter. If the covariance
+    blocks are still not positive-definite, it falls back to eigenvalue
+    clipping block by block.
+    """
+    if cov_blocks.ndim not in (3, 4):
+        raise ValueError(
+            f"cov_blocks should have shape [T + 1, z_dim, z_dim] or "
+            f"[B, T + 1, z_dim, z_dim], but got {cov_blocks.shape}"
+        )
+
+    z_dim = cov_blocks.shape[-1]
+    eye = torch.eye(z_dim, device=cov_blocks.device, dtype=cov_blocks.dtype)
+    eye_shape = (1, z_dim, z_dim) if cov_blocks.ndim == 3 else (1, 1, z_dim, z_dim)
+    eye = eye.view(*eye_shape)
+
+    cov_blocks = 0.5 * (cov_blocks + cov_blocks.transpose(-1, -2))
+
+    jitter = eps
+    for _ in range(max_tries):
+        try:
+            return torch.linalg.cholesky(cov_blocks + jitter * eye)
+        except torch._C._LinAlgError:
+            jitter *= 10.0
+
+    # Fallback: eigenvalue clipping. This is slower but much more robust.
+    eigvals, eigvecs = torch.linalg.eigh(cov_blocks)
+    eigvals = torch.clamp(eigvals, min=eps)
+    cov_stable = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-1, -2)
+    cov_stable = 0.5 * (cov_stable + cov_stable.transpose(-1, -2))
+
+    jitter = eps
+    for _ in range(max_tries):
+        try:
+            return torch.linalg.cholesky(cov_stable + jitter * eye)
+        except torch._C._LinAlgError:
+            jitter *= 10.0
+
+    raise RuntimeError(
+        "_safe_block_cholesky failed: covariance blocks cannot be made "
+        "positive-definite even after adaptive jitter and eigenvalue clipping. "
+        "Try increasing eps or process_noise_scale."
+    )
+
+
 def reparameterize_block_diag(mu, cov_blocks, T, z_dim, eps=1e-4):
     """
     Reparameterization for block-diagonal Gaussian covariance.
@@ -305,7 +363,7 @@ def reparameterize_block_diag(mu, cov_blocks, T, z_dim, eps=1e-4):
         )
 
     cov_blocks = _make_block_spd(cov_blocks, eps=eps)
-    L = torch.linalg.cholesky(cov_blocks)
+    L = _safe_block_cholesky(cov_blocks, eps=eps)
 
     if mu_single:
         eps_sample = torch.randn_like(mu_mat).unsqueeze(-1)
@@ -349,8 +407,8 @@ def kl_divergence_block_diag_gaussian(mu_q, cov_q, mu_p, cov_p, T, z_dim, eps=1e
     cov_q = _make_block_spd(cov_q, eps=eps)
     cov_p = _make_block_spd(cov_p, eps=eps)
 
-    L_q = torch.linalg.cholesky(cov_q)
-    L_p = torch.linalg.cholesky(cov_p)
+    L_q = _safe_block_cholesky(cov_q, eps=eps)
+    L_p = _safe_block_cholesky(cov_p, eps=eps)
 
     logdet_q = 2.0 * torch.sum(
         torch.log(torch.diagonal(L_q, dim1=-2, dim2=-1)),

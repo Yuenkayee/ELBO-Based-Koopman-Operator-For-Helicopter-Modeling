@@ -18,7 +18,7 @@ def main():
     embed_dim = 128
     para_mu = 1.0
     para_lambda = 0.1
-    batch_size = 50
+    batch_size = 250
 
     _, U_seq_dim = trainData.U_seq.shape
     if (U_seq_dim - x_dim) % u_dim != 0:
