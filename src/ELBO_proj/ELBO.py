@@ -14,7 +14,7 @@ from basic_objects.basicFunctions import reparameterize_block_diag
 
 
 class ELBO(nn.Module):
-    def __init__(self, x_dim, u_dim, z_dim, h_dim, embed_dim, T, para_mu, para_lambda):
+    def __init__(self, x_dim, u_dim, z_dim, h_dim, embed_dim, T, para_mu, para_lambda, para_dyn=1.0):
         super().__init__()
         self.x_dim = x_dim
         self.u_dim = u_dim
@@ -24,6 +24,7 @@ class ELBO(nn.Module):
         self.T = T
         self.para_mu = para_mu
         self.para_lambda = para_lambda
+        self.para_dyn = para_dyn
 
         self.nn_A = nn.Linear(z_dim, z_dim, bias=False)  # 矩阵 A
         self.nn_B = nn.Linear(u_dim, z_dim, bias=False)  # 矩阵 B
@@ -88,6 +89,16 @@ class ELBO(nn.Module):
         eye_x = torch.eye(self.x_dim, device=X_seq.device, dtype=X_seq.dtype)
         reconstruction_loss = F.mse_loss(X_hat, X_seq)
         inverse_loss = torch.mean((self.nn_C.weight @ self.nn_Wc.weight - eye_x) ** 2)
+
+        mu_after_mat = mu_after.reshape(X_seq.shape[0], self.T + 1, self.z_dim)
+        U_flat = U_seq[:, self.x_dim : self.x_dim + self.T * self.u_dim]
+        U_mat = U_flat.reshape(X_seq.shape[0], self.T, self.u_dim)
+
+        z_now = mu_after_mat[:, 0 : self.T, :]
+        z_next = mu_after_mat[:, 1 : self.T + 1, :]
+        z_next_pred = self.nn_A(z_now) + self.nn_B(U_mat)
+        dynamics_loss = F.mse_loss(z_next_pred, z_next)
+
         kl_loss = kl_divergence_block_diag_gaussian(
             mu_after,
             cov_after,
@@ -97,7 +108,12 @@ class ELBO(nn.Module):
             self.z_dim,
         ) / ((self.T + 1) * self.z_dim)
 
-        loss = reconstruction_loss + self.para_mu * inverse_loss + self.para_lambda * kl_loss
+        loss = (
+            reconstruction_loss
+            + self.para_mu * inverse_loss
+            + self.para_lambda * kl_loss
+            + self.para_dyn * dynamics_loss
+        )
 
         return {
             "A": self.nn_A.weight,
@@ -106,6 +122,7 @@ class ELBO(nn.Module):
             "loss": loss,
             "reconstruction_loss": reconstruction_loss,
             "inverse_loss": inverse_loss,
+            "dynamics_loss": dynamics_loss,
             "KL_loss": kl_loss,
         }
 
@@ -155,6 +172,7 @@ def train_elbo(
         epoch_reconstruction_loss = 0.0
         epoch_inverse_loss = 0.0
         epoch_kl_loss = 0.0
+        epoch_dynamics_loss = 0.0
 
         for start in range(0, S, batch_size):
             idx = perm[start : start + batch_size]
@@ -168,6 +186,7 @@ def train_elbo(
             loss = out["loss"]
             reconstruction_loss = out["reconstruction_loss"]
             inverse_loss = out["inverse_loss"]
+            dynamics_loss = out["dynamics_loss"]
             kl_loss = out["KL_loss"]
 
             loss.backward()
@@ -177,11 +196,13 @@ def train_elbo(
             epoch_loss += loss.item() * current_batch_size
             epoch_reconstruction_loss += reconstruction_loss.item() * current_batch_size
             epoch_inverse_loss += inverse_loss.item() * current_batch_size
+            epoch_dynamics_loss += dynamics_loss.item() * current_batch_size
             epoch_kl_loss += kl_loss.item() * current_batch_size
 
         loss = X_all.new_tensor(epoch_loss / S)
         reconstruction_loss = X_all.new_tensor(epoch_reconstruction_loss / S)
         inverse_loss = X_all.new_tensor(epoch_inverse_loss / S)
+        dynamics_loss = X_all.new_tensor(epoch_dynamics_loss / S)
         kl_loss = X_all.new_tensor(epoch_kl_loss / S)
 
         if str(device).startswith("cuda"):
@@ -209,6 +230,7 @@ def train_elbo(
             f"Loss: {loss.item():.6f} | "
             f"Loss_re: {reconstruction_loss.item():.6f} | "
             f"Loss_inv: {inverse_loss.item():.6f} | "
+            f"Loss_dyn: {dynamics_loss.item():.6f} | "
             f"Loss_kl: {kl_loss.item():.6f} | "
             f"{memory_info}"
         )
