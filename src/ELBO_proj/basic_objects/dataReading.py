@@ -3,12 +3,55 @@ from dataclasses import dataclass
 
 import torch
 import scipy.io as sio
+import numpy as np
 
 
 @dataclass
 class TrainData:
     X_seq: torch.Tensor
     U_seq: torch.Tensor
+
+
+def _load_mat_file(file_path):
+    """
+    Load MATLAB .mat data.
+
+    scipy.io.loadmat supports MATLAB v7.2 and earlier files.
+    MATLAB v7.3 files are HDF5-based, so they need to be read by h5py.
+    """
+    try:
+        return sio.loadmat(file_path)
+    except NotImplementedError as err:
+        if "matlab v7.3" not in str(err).lower():
+            raise
+
+        try:
+            import h5py
+        except ImportError as h5py_err:
+            raise ImportError(
+                "当前 .mat 文件是 MATLAB v7.3 格式，scipy.io.loadmat 无法读取。"
+                "请先安装 h5py，例如执行：python -m pip install h5py"
+            ) from h5py_err
+
+        mat_data = {}
+        with h5py.File(file_path, "r") as f:
+            for key in f.keys():
+                obj = f[key]
+                if not hasattr(obj, "shape"):
+                    continue
+
+                arr = np.array(obj)
+
+                # MATLAB v7.3 uses HDF5 storage and matrices are commonly read
+                # with reversed dimension order by h5py. For the 2D simulation
+                # matrices used here, transpose them back to MATLAB's original
+                # [time, dim] convention.
+                if arr.ndim == 2:
+                    arr = arr.T
+
+                mat_data[key] = arr
+
+        return mat_data
 
 
 def load_matlab_simulation_data(
@@ -32,7 +75,7 @@ def load_matlab_simulation_data(
         current_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(current_dir, "../data", "trainData.mat")
 
-    mat_data = sio.loadmat(file_path)
+    mat_data = _load_mat_file(file_path)
 
     if S is None:
         S = 0
