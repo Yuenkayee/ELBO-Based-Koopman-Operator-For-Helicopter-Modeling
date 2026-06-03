@@ -11,13 +11,13 @@ from basic_objects.dataReading import load_matlab_simulation_data
 def main():
     trainData = load_matlab_simulation_data()
 
-    x_dim = 12
+    x_dim = 9
     u_dim = 4
     z_dim = 24
     h_dim = 24
-    embed_dim = 36
+    embed_dim = 24
     para_mu = 1.0
-    para_lambda = 1.0
+    para_lambda = 0.01
     para_dyn = 10.0
     batch_size = 500
 
@@ -67,7 +67,7 @@ def main():
         model=model,
         trainData=trainData,
         num_epochs=500,
-        lr=5e-3,
+        lr=5e-4,
         device="cuda",
         batch_size=batch_size,
     )
