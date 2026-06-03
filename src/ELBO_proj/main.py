@@ -17,9 +17,11 @@ def main():
     h_dim = 24
     embed_dim = 36
     para_mu = 1.0
-    para_lambda = 0.01
+    para_lambda = 0.001
+    para_z0 = 1.0
+    para_dyn = 1.0
     para_rollout = 1.0
-    batch_size = 500
+    batch_size = 32
 
     _, U_seq_dim = trainData.U_seq.shape
     if (U_seq_dim - x_dim) % u_dim != 0:
@@ -47,10 +49,12 @@ def main():
         para_mu=para_mu,
         para_lambda=para_lambda,
         para_rollout=para_rollout,
+        para_z0=para_z0,
+        para_dyn=para_dyn,
     )
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    checkpoint_path = os.path.join(current_dir, "data", "elbo_model_rollout_checkpoint.pt")
+    checkpoint_path = os.path.join(current_dir, "data", "elbo_model_z0_dyn_rollout_checkpoint.pt")
 
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -87,6 +91,8 @@ def main():
             "T": T,
             "para_mu": para_mu,
             "para_lambda": para_lambda,
+            "para_z0": para_z0,
+            "para_dyn": para_dyn,
             "para_rollout": para_rollout,
             "batch_size": batch_size,
         },
