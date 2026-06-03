@@ -11,13 +11,13 @@ from basic_objects.dataReading import load_matlab_simulation_data
 def main():
     trainData = load_matlab_simulation_data()
 
-    x_dim = 12
+    x_dim = 9
     u_dim = 4
     z_dim = 24
     h_dim = 24
     embed_dim = 36
     para_mu = 1.0
-    para_lambda = 0.001
+    para_lambda = 0.1
     para_z0 = 1.0
     para_dyn = 1.0
     para_rollout = 1.0
@@ -70,7 +70,7 @@ def main():
     model = train_elbo(
         model=model,
         trainData=trainData,
-        num_epochs=2000,
+        num_epochs=4000,
         lr=5e-4,
         device="cuda",
         batch_size=batch_size,
