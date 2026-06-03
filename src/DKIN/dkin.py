@@ -2,17 +2,378 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from DKIN.basicParts_dkin.basicFunctions import reparameterize, gaussian_kl
-from DKIN.basicParts_dkin.TemporalEncoder import TemporalEncoder
-from DKIN.basicParts_dkin.ObservationGenerator import ObservationGenerator
-from DKIN.basicParts_dkin.KoopmanLayer import KoopmanLayer
-from DKIN.basicParts_dkin.ConditionalPN import ConditionalPrior
-from DKIN.basicParts_dkin.Decoder import Decoder
+
+
+# ============================================================
+# 1. Basic utility functions
+# ============================================================
+
+def reparameterize(mu, logvar):
+    """
+    Reparameterization trick:
+        h = mu + std * eps
+    where eps ~ N(0, I)
+    """
+    std = torch.exp(0.5 * logvar)
+    eps = torch.randn_like(std)
+    return mu + std * eps
+
+
+def gaussian_kl(mu_q, logvar_q, mu_p, logvar_p):
+    """
+    KL divergence between two diagonal Gaussian distributions:
+
+        q = N(mu_q, diag(var_q))
+        p = N(mu_p, diag(var_p))
+
+    Return:
+        KL(q || p), averaged over batch.
+    """
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p)
+
+    kl = 0.5 * (
+        logvar_p - logvar_q
+        + (var_q + (mu_q - mu_p) ** 2) / var_p
+        - 1.0
+    )
+
+    return kl.sum(dim=-1).mean()
+
+
+# ============================================================
+# 2. Temporal Encoder: bidirectional LSTM
+# ============================================================
+
+class TemporalEncoder(nn.Module):
+    """
+    Temporal encoder:
+        input:  I_t = [x_t; u_t]
+        output: temporal embedding \hat{I}_t
+
+    Shape:
+        x_seq: [batch, T, x_dim]
+        u_seq: [batch, T-1, u_dim]
+
+    Since u has length T-1, we pad the last control input with zero.
+    """
+
+    def __init__(self, x_dim, u_dim, hidden_dim, embed_dim):
+        super().__init__()
+
+        self.x_dim = x_dim
+        self.u_dim = u_dim
+
+        self.lstm = nn.LSTM(
+            input_size=x_dim + u_dim,
+            hidden_size=hidden_dim,
+            batch_first=True,
+            bidirectional=True
+        )
+
+        self.proj = nn.Linear(2 * hidden_dim, embed_dim)
+
+    def forward(self, x_seq, u_seq):
+        batch_size, T, _ = x_seq.shape
+
+        # Pad u_T as zero so that u_seq_pad has length T
+        u_pad = torch.zeros(
+            batch_size, 1, self.u_dim,
+            device=x_seq.device,
+            dtype=x_seq.dtype
+        )
+
+        u_seq_pad = torch.cat([u_seq, u_pad], dim=1)
+
+        I_seq = torch.cat([x_seq, u_seq_pad], dim=-1)
+
+        lstm_out, _ = self.lstm(I_seq)
+
+        I_hat = torch.tanh(self.proj(lstm_out))
+
+        return I_hat
+
+
+# ============================================================
+# 3. Observation Generation Block
+# ============================================================
+
+class ObservationGenerator(nn.Module):
+    """
+    Observation generation block.
+
+    It includes:
+
+    1. Initial recognition network:
+        q_phi(h_1 | x_{1:T}, u_{1:T-1})
+
+    2. Observation encoder:
+        summarizes h_{1:t-1} using GRU
+
+    3. Observation recognition network:
+        q_psi(h_t | h_{1:t-1}, x_{1:t}, u_{1:t-1})
+    """
+
+    def __init__(self, embed_dim, h_dim, gru_hidden_dim):
+        super().__init__()
+
+        self.h_dim = h_dim
+        self.gru_hidden_dim = gru_hidden_dim
+
+        # Initial recognition network
+        self.init_net = nn.Sequential(
+            nn.Linear(embed_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2 * h_dim)
+        )
+
+        # GRU for summarizing previous observations h_{1:t-1}
+        self.obs_gru = nn.GRU(
+            input_size=h_dim,
+            hidden_size=gru_hidden_dim,
+            batch_first=True
+        )
+
+        # Recognition network for h_t
+        self.recognition_net = nn.Sequential(
+            nn.Linear(embed_dim + gru_hidden_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2 * h_dim)
+        )
+
+    def initial_distribution(self, I_hat):
+        """
+        Compute q_phi(h_1 | x_{1:T}, u_{1:T-1})
+
+        Here we use the first temporal embedding I_hat[:, 0, :].
+        One may also use mean pooling or the final hidden state.
+        """
+        init_feat = I_hat[:, 0, :]
+        out = self.init_net(init_feat)
+
+        mu, logvar = torch.chunk(out, chunks=2, dim=-1)
+        return mu, logvar
+
+    def recognition_distribution(self, I_hat_t, h_history):
+        """
+        Compute q_psi(h_t | h_{1:t-1}, x_{1:t}, u_{1:t-1})
+
+        Parameters:
+            I_hat_t:   [batch, embed_dim]
+            h_history: [batch, t-1, h_dim]
+
+        Return:
+            mu_t, logvar_t
+        """
+
+        _, hidden = self.obs_gru(h_history)
+
+        # hidden: [1, batch, gru_hidden_dim]
+        hidden = hidden[-1]
+
+        feat = torch.cat([I_hat_t, hidden], dim=-1)
+
+        out = self.recognition_net(feat)
+
+        mu, logvar = torch.chunk(out, chunks=2, dim=-1)
+
+        return mu, logvar
+
+
+# ============================================================
+# 4. Conditional Prior Network
+# ============================================================
+
+class ConditionalPrior(nn.Module):
+    """
+    Conditional prior network:
+
+        p_epsilon(h_t | h_{t-1}, u_{t-1})
+
+    It outputs the mean and log-variance of a Gaussian prior.
+    """
+
+    def __init__(self, h_dim, u_dim):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(h_dim + u_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2 * h_dim)
+        )
+
+    def forward(self, h_prev, u_prev):
+        inp = torch.cat([h_prev, u_prev], dim=-1)
+
+        out = self.net(inp)
+
+        mu, logvar = torch.chunk(out, chunks=2, dim=-1)
+
+        return mu, logvar
+
+
+# ============================================================
+# 5. Koopman Layer
+# ============================================================
+
+class KoopmanLayer(nn.Module):
+    """
+    Koopman layer.
+
+    Given sampled observations h_{1:T} and controls u_{1:T-1},
+    compute A and B from:
+
+        [A B] = Y Z^\dagger
+
+    where
+
+        Y = [h_2, ..., h_T]
+        Z = [h_1, ..., h_{T-1};
+             u_1, ..., u_{T-1}]
+
+    For each batch sample, A and B are computed separately.
+    """
+
+    def __init__(self, h_dim, u_dim, reg=1e-6):
+        super().__init__()
+
+        self.h_dim = h_dim
+        self.u_dim = u_dim
+        self.reg = reg
+
+    def forward(self, h_seq, u_seq):
+        """
+        Parameters:
+            h_seq: [batch, T, h_dim]
+            u_seq: [batch, T-1, u_dim]
+
+        Returns:
+            A: [batch, h_dim, h_dim]
+            B: [batch, h_dim, u_dim]
+        """
+
+        batch_size, T, h_dim = h_seq.shape
+        _, T_minus_1, u_dim = u_seq.shape
+
+        assert T_minus_1 == T - 1
+
+        A_list = []
+        B_list = []
+
+        for b in range(batch_size):
+            # H_past: [h_dim, T-1]
+            H_past = h_seq[b, :-1, :].T
+
+            # H_next: [h_dim, T-1]
+            H_next = h_seq[b, 1:, :].T
+
+            # U: [u_dim, T-1]
+            U = u_seq[b].T
+
+            # Z: [h_dim + u_dim, T-1]
+            Z = torch.cat([H_past, U], dim=0)
+
+            # Y: [h_dim, T-1]
+            Y = H_next
+
+            # Moore-Penrose pseudoinverse
+            Z_pinv = torch.linalg.pinv(Z)
+
+            # K = [A B]: [h_dim, h_dim + u_dim]
+            K = Y @ Z_pinv
+
+            A = K[:, :h_dim]
+            B = K[:, h_dim:]
+
+            # Small regularization for numerical stability
+            A = A + self.reg * torch.eye(
+                h_dim,
+                device=h_seq.device,
+                dtype=h_seq.dtype
+            )
+
+            A_list.append(A)
+            B_list.append(B)
+
+        A = torch.stack(A_list, dim=0)
+        B = torch.stack(B_list, dim=0)
+
+        return A, B
+
+    def backward_rollout(self, h_seq, u_seq, A, B):
+        """
+        Backward-time latent rollout:
+
+            z_T = h_T
+            z_t = A^{-1}(z_{t+1} - B u_t)
+
+        Parameters:
+            h_seq: [batch, T, h_dim]
+            u_seq: [batch, T-1, u_dim]
+            A:     [batch, h_dim, h_dim]
+            B:     [batch, h_dim, u_dim]
+
+        Return:
+            z_seq: [batch, T, h_dim]
+        """
+
+        batch_size, T, h_dim = h_seq.shape
+
+        z_list = [None for _ in range(T)]
+
+        z_T = h_seq[:, -1, :]
+        z_list[T - 1] = z_T
+
+        for t in range(T - 2, -1, -1):
+            z_next = z_list[t + 1]
+            u_t = u_seq[:, t, :]
+
+            Bu = torch.bmm(B, u_t.unsqueeze(-1)).squeeze(-1)
+
+            rhs = z_next - Bu
+
+            # Solve A z_t = rhs instead of explicitly computing A^{-1}
+            z_t = torch.linalg.solve(A, rhs.unsqueeze(-1)).squeeze(-1)
+
+            z_list[t] = z_t
+
+        z_seq = torch.stack(z_list, dim=1)
+
+        return z_seq
+
+
+# ============================================================
+# 6. Decoder
+# ============================================================
+
+class Decoder(nn.Module):
+    """
+    Decoder:
+
+        mu_t = C_mu z_t
+
+    According to the paper, the decoder can be a linear map
+    without activation function.
+    """
+
+    def __init__(self, h_dim, x_dim):
+        super().__init__()
+
+        self.linear = nn.Linear(h_dim, x_dim)
+
+    def forward(self, z_seq):
+        """
+        z_seq: [batch, T, h_dim]
+
+        return:
+            mu_seq: [batch, T, x_dim]
+        """
+        return self.linear(z_seq)
+
 
 # ============================================================
 # 7. Full DKIN Model
 # ============================================================
-
 
 class DKIN(nn.Module):
     """
@@ -39,7 +400,7 @@ class DKIN(nn.Module):
         h_dim,
         temporal_hidden_dim=64,
         temporal_embed_dim=64,
-        obs_gru_hidden_dim=64,
+        obs_gru_hidden_dim=64
     ):
         super().__init__()
 
@@ -51,18 +412,29 @@ class DKIN(nn.Module):
             x_dim=x_dim,
             u_dim=u_dim,
             hidden_dim=temporal_hidden_dim,
-            embed_dim=temporal_embed_dim,
+            embed_dim=temporal_embed_dim
         )
 
         self.observation_generator = ObservationGenerator(
-            embed_dim=temporal_embed_dim, h_dim=h_dim, gru_hidden_dim=obs_gru_hidden_dim
+            embed_dim=temporal_embed_dim,
+            h_dim=h_dim,
+            gru_hidden_dim=obs_gru_hidden_dim
         )
 
-        self.conditional_prior = ConditionalPrior(h_dim=h_dim, u_dim=u_dim)
+        self.conditional_prior = ConditionalPrior(
+            h_dim=h_dim,
+            u_dim=u_dim
+        )
 
-        self.koopman_layer = KoopmanLayer(h_dim=h_dim, u_dim=u_dim)
+        self.koopman_layer = KoopmanLayer(
+            h_dim=h_dim,
+            u_dim=u_dim
+        )
 
-        self.decoder = Decoder(h_dim=h_dim, x_dim=x_dim)
+        self.decoder = Decoder(
+            h_dim=h_dim,
+            x_dim=x_dim
+        )
 
     def forward(self, x_seq, u_seq):
         batch_size, T, _ = x_seq.shape
@@ -85,34 +457,42 @@ class DKIN(nn.Module):
         logvar_prior_h1 = torch.zeros_like(logvar_h1)
 
         kl_loss = gaussian_kl(
-            mu_q=mu_h1, logvar_q=logvar_h1, mu_p=mu_prior_h1, logvar_p=logvar_prior_h1
+            mu_q=mu_h1,
+            logvar_q=logvar_h1,
+            mu_p=mu_prior_h1,
+            logvar_p=logvar_prior_h1
         )
 
         # ------------------------------------------------------
         # Step 3: Sequential observation generation
         # ------------------------------------------------------
         for t in range(1, T):
-            # torch.stack 是 PyTorch 中用于把多个形状相同的张量沿一个新维度堆叠起来的函数。
-            # torch.stack 的输出要比原来的张量多一个维度，这里使用该函数是为了对齐 recognition_distribution 的接口
             h_history = torch.stack(h_list, dim=1)
 
             I_hat_t = I_hat[:, t, :]
 
             mu_q, logvar_q = self.observation_generator.recognition_distribution(
-                I_hat_t=I_hat_t, h_history=h_history
+                I_hat_t=I_hat_t,
+                h_history=h_history
             )
 
             h_prev = h_list[-1]
             u_prev = u_seq[:, t - 1, :]
 
-            mu_p, logvar_p = self.conditional_prior(h_prev=h_prev, u_prev=u_prev)
+            mu_p, logvar_p = self.conditional_prior(
+                h_prev=h_prev,
+                u_prev=u_prev
+            )
 
             h_t = reparameterize(mu_q, logvar_q)
 
-            h_list.append(h_t)  # 在 h_list 末尾添加一个新的元素
+            h_list.append(h_t)
 
             kl_loss = kl_loss + gaussian_kl(
-                mu_q=mu_q, logvar_q=logvar_q, mu_p=mu_p, logvar_p=logvar_p
+                mu_q=mu_q,
+                logvar_q=logvar_q,
+                mu_p=mu_p,
+                logvar_p=logvar_p
             )
 
         h_seq = torch.stack(h_list, dim=1)
@@ -125,7 +505,12 @@ class DKIN(nn.Module):
         # ------------------------------------------------------
         # Step 5: Backward latent rollout
         # ------------------------------------------------------
-        z_seq = self.koopman_layer.backward_rollout(h_seq=h_seq, u_seq=u_seq, A=A, B=B)
+        z_seq = self.koopman_layer.backward_rollout(
+            h_seq=h_seq,
+            u_seq=u_seq,
+            A=A,
+            B=B
+        )
 
         # ------------------------------------------------------
         # Step 6: Decoding
@@ -138,14 +523,13 @@ class DKIN(nn.Module):
             "z_seq": z_seq,
             "A": A,
             "B": B,
-            "kl_loss": kl_loss,
+            "kl_loss": kl_loss
         }
 
 
 # ============================================================
 # 8. Dataset wrapper
 # ============================================================
-
 
 class SequenceDataset(Dataset):
     """
@@ -180,7 +564,6 @@ class SequenceDataset(Dataset):
 # 9. Training function
 # ============================================================
 
-
 def train_dkin(
     model,
     dataloader,
@@ -189,7 +572,7 @@ def train_dkin(
     kappa_1=1.2,
     kappa_2=1.0,
     omega_T=5.0,
-    device="cpu",
+    device="cpu"
 ):
     """
     Train DKIN model.
@@ -225,11 +608,15 @@ def train_dkin(
 
             # Prediction loss
             pred_loss_main = F.mse_loss(
-                mu_seq[:, :-1, :], x_seq[:, :-1, :], reduction="mean"
+                mu_seq[:, :-1, :],
+                x_seq[:, :-1, :],
+                reduction="mean"
             )
 
             pred_loss_terminal = F.mse_loss(
-                mu_seq[:, -1, :], x_seq[:, -1, :], reduction="mean"
+                mu_seq[:, -1, :],
+                x_seq[:, -1, :],
+                reduction="mean"
             )
 
             pred_loss = pred_loss_main + omega_T * pred_loss_terminal
