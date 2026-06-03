@@ -18,6 +18,7 @@ def main():
     embed_dim = 36
     para_mu = 1.0
     para_lambda = 0.01
+    para_dyn = 1.0
     batch_size = 500
 
     _, U_seq_dim = trainData.U_seq.shape
@@ -45,6 +46,7 @@ def main():
         T=T,
         para_mu=para_mu,
         para_lambda=para_lambda,
+        para_dyn=para_dyn,
     )
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -64,7 +66,7 @@ def main():
     model = train_elbo(
         model=model,
         trainData=trainData,
-        num_epochs=2000,
+        num_epochs=4000,
         lr=5e-4,
         device="cuda",
         batch_size=batch_size,
@@ -85,6 +87,7 @@ def main():
             "T": T,
             "para_mu": para_mu,
             "para_lambda": para_lambda,
+            "para_dyn": para_dyn,
             "batch_size": batch_size,
         },
         checkpoint_path,
