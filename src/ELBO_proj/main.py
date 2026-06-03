@@ -17,7 +17,7 @@ def main():
     h_dim = 24
     embed_dim = 36
     para_mu = 1.0
-    para_lambda = 0.01
+    para_lambda = 1.0
     para_dyn = 10.0
     batch_size = 500
 
@@ -66,8 +66,8 @@ def main():
     model = train_elbo(
         model=model,
         trainData=trainData,
-        num_epochs=4000,
-        lr=5e-4,
+        num_epochs=500,
+        lr=5e-3,
         device="cuda",
         batch_size=batch_size,
     )
