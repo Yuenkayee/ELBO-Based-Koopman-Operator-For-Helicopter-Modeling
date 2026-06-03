@@ -18,7 +18,7 @@ def main():
     embed_dim = 36
     para_mu = 1.0
     para_lambda = 0.01
-    para_dyn = 1.0
+    para_dyn = 10.0
     batch_size = 500
 
     _, U_seq_dim = trainData.U_seq.shape
