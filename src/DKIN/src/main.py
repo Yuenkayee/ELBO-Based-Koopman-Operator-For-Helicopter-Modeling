@@ -32,7 +32,6 @@ CONFIG = {
 
     # Checkpoint
     "resume": True,
-    "save_every": 1,
 }
 
 
@@ -449,30 +448,18 @@ def main():
             f"KL: {metrics['kl_loss']:.6f}"
         )
 
-        if (epoch + 1) % CONFIG["save_every"] == 0:
-            save_checkpoint(
-                checkpoint_path=latest_checkpoint_path,
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                config=CONFIG,
-                x_dim=x_dim,
-                u_dim=u_dim,
-                loss_history=loss_history,
-            )
-
-            epoch_checkpoint_path = checkpoint_dir / f"epoch_{epoch + 1:04d}.pt"
-
-            save_checkpoint(
-                checkpoint_path=epoch_checkpoint_path,
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                config=CONFIG,
-                x_dim=x_dim,
-                u_dim=u_dim,
-                loss_history=loss_history,
-            )
+    final_epoch = num_epochs - 1
+    save_checkpoint(
+        checkpoint_path=latest_checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        epoch=final_epoch,
+        config=CONFIG,
+        x_dim=x_dim,
+        u_dim=u_dim,
+        loss_history=loss_history,
+    )
+    print(f"Saved final checkpoint to {latest_checkpoint_path}")
 
     export_train_result(
         model=model,
