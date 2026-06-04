@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple
+import time
 
 import numpy as np
 import torch
@@ -128,6 +129,7 @@ class TrainConfig:
     seed: int = 1
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint_path: Optional[str] = None
+    resume_from_checkpoint: bool = True
     print_every: int = 10
 
 def _to_numpy_from_mat_value(value) -> np.ndarray:
@@ -322,6 +324,7 @@ def one_epoch(
     optimizer: Optional[torch.optim.Optimizer],
     device: torch.device,
     rollout_steps: Optional[int] = None,
+    grad_clip_norm: Optional[float] = None,
 ) -> float:
     is_train = optimizer is not None
     model.train(is_train)
@@ -347,6 +350,8 @@ def one_epoch(
             loss = weighted_multistep_loss(X_hat, X)
             if is_train:
                 loss.backward()
+                if grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                 optimizer.step()
 
         batch_size = X.shape[0]
@@ -387,9 +392,28 @@ def train_dkoia(
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     history: Dict[str, list[float]] = {"train_loss": [], "val_loss": []}
 
+    start_epoch = 1
     best_val = float("inf")
-    for epoch in range(1, config.epochs + 1):
-        train_loss = one_epoch(model, train_loader, optimizer, device, config.rollout_steps)
+    if config.resume_from_checkpoint and config.checkpoint_path is not None and Path(config.checkpoint_path).is_file():
+        checkpoint = load_checkpoint(model, config.checkpoint_path, optimizer=optimizer, map_location=device)
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        history = checkpoint.get("history", history)
+        if len(history.get("val_loss", [])) > 0:
+            best_val = min(history["val_loss"])
+        elif len(history.get("train_loss", [])) > 0:
+            best_val = min(history["train_loss"])
+        print(f"Resumed training from {config.checkpoint_path}, start_epoch={start_epoch}")
+
+    if start_epoch > config.epochs:
+        print(
+            f"Checkpoint epoch is already {start_epoch - 1}, which is >= configured epochs={config.epochs}. "
+            "No additional training will be performed. Increase config.epochs to continue training."
+        )
+        return history
+
+    interval_start_time = time.perf_counter()
+    for epoch in range(start_epoch, config.epochs + 1):
+        train_loss = one_epoch(model, train_loader, optimizer, device, config.rollout_steps, config.grad_clip_norm)
         history["train_loss"].append(train_loss)
 
         if val_loader is not None:
@@ -403,8 +427,20 @@ def train_dkoia(
             best_val = val_loss
             save_checkpoint(model, optimizer, epoch, history, config.checkpoint_path)
 
-        if epoch == 1 or epoch % config.print_every == 0 or epoch == config.epochs:
-            print(f"Epoch [{epoch:04d}/{config.epochs:04d}] train_loss={train_loss:.6e} val_loss={val_loss:.6e}")
+        if epoch == start_epoch or epoch % config.print_every == 0 or epoch == config.epochs:
+            elapsed = time.perf_counter() - interval_start_time
+            num_epochs_in_interval = epoch - start_epoch + 1 if epoch == start_epoch else config.print_every
+            if epoch == config.epochs and epoch % config.print_every != 0 and epoch != start_epoch:
+                previous_print_epoch = epoch - ((epoch - start_epoch + 1) % config.print_every)
+                if previous_print_epoch < start_epoch:
+                    previous_print_epoch = start_epoch - 1
+                num_epochs_in_interval = epoch - previous_print_epoch
+            print(
+                f"Epoch [{epoch:04d}/{config.epochs:04d}] "
+                f"train_loss={train_loss:.6e} val_loss={val_loss:.6e} "
+                f"time_for_last_{num_epochs_in_interval}_epochs={elapsed:.3f}s"
+            )
+            interval_start_time = time.perf_counter()
 
     return history
 
@@ -507,32 +543,88 @@ def save_matrices_mat(model: DKOIA, mat_path: str | Path) -> None:
     mat_path.parent.mkdir(parents=True, exist_ok=True)
     savemat(str(mat_path), model.matrices_numpy())
 
+def _linear_layer_to_mat(prefix: str, layer: nn.Linear) -> Dict[str, np.ndarray]:
+    """Convert one nn.Linear layer to MATLAB-friendly arrays."""
+    out: Dict[str, np.ndarray] = {f"{prefix}_weight": layer.weight.detach().cpu().numpy()}
+    if layer.bias is not None:
+        out[f"{prefix}_bias"] = layer.bias.detach().cpu().numpy()
+    else:
+        out[f"{prefix}_bias"] = np.zeros((layer.out_features,), dtype=np.float32)
+    return out
 
-def save_checkpoint(
-    model: DKOIA,
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-    history: Dict[str, list[float]],
-    checkpoint_path: str | Path,
-) -> None:
-    checkpoint_path = Path(checkpoint_path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "history": history,
-            "dims": {
-                "x_dim": model.x_dim,
-                "u_dim": model.u_dim,
-                "p_dim": model.p_dim,
-                "z_dim": model.z_dim,
-                "phi_dim": model.phi_dim,
+
+def _mlp_to_mat(prefix: str, mlp: Optional[MLP]) -> Dict[str, np.ndarray]:
+    """
+    Export MLP Linear-layer weights and biases.
+
+    The exported variables are named like:
+        psi_layer_1_weight, psi_layer_1_bias, psi_layer_2_weight, ...
+        phi_layer_1_weight, phi_layer_1_bias, phi_layer_2_weight, ...
+
+    ReLU activation should be applied after every exported layer except the final layer.
+    """
+    out: Dict[str, np.ndarray] = {}
+    if mlp is None:
+        out[f"{prefix}_num_linear_layers"] = np.array([[0]], dtype=np.int64)
+        return out
+
+    linear_idx = 1
+    for module in mlp.net:
+        if isinstance(module, nn.Linear):
+            out.update(_linear_layer_to_mat(f"{prefix}_layer_{linear_idx}", module))
+            linear_idx += 1
+    out[f"{prefix}_num_linear_layers"] = np.array([[linear_idx - 1]], dtype=np.int64)
+    return out
+
+
+def export_model_for_matlab(model: DKOIA, mat_path: str | Path, pt_path: Optional[str | Path] = None) -> None:
+    """
+    Export A, B, C, psi_net and phi_net for MATLAB/Simulink use.
+
+    The .mat file contains Koopman matrices and all Linear-layer weights/biases
+    of psi_net and phi_net. In MATLAB, each Linear layer should be evaluated as:
+        y = W * x + b
+    with ReLU after each hidden layer and no activation after the final layer.
+    """
+    if savemat is None:
+        raise ImportError("scipy is required to save .mat files: pip install scipy")
+
+    mat_path = Path(mat_path)
+    mat_path.parent.mkdir(parents=True, exist_ok=True)
+
+    export_dict: Dict[str, np.ndarray] = {
+        "A": model.A.detach().cpu().numpy(),
+        "B": model.B.detach().cpu().numpy(),
+        "C": model.C.detach().cpu().numpy(),
+        "x_dim": np.array([[model.x_dim]], dtype=np.int64),
+        "u_dim": np.array([[model.u_dim]], dtype=np.int64),
+        "p_dim": np.array([[model.p_dim]], dtype=np.int64),
+        "z_dim": np.array([[model.z_dim]], dtype=np.int64),
+        "phi_dim": np.array([[model.phi_dim]], dtype=np.int64),
+        "ell_dim": np.array([[model.ell_dim]], dtype=np.int64),
+    }
+    export_dict.update(_mlp_to_mat("psi", model.psi_net))
+    export_dict.update(_mlp_to_mat("phi", model.phi_net))
+
+    savemat(str(mat_path), export_dict)
+
+    if pt_path is not None:
+        pt_path = Path(pt_path)
+        pt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "dims": {
+                    "x_dim": model.x_dim,
+                    "u_dim": model.u_dim,
+                    "p_dim": model.p_dim,
+                    "z_dim": model.z_dim,
+                    "phi_dim": model.phi_dim,
+                    "ell_dim": model.ell_dim,
+                },
             },
-        },
-        checkpoint_path,
-    )
+            pt_path,
+        )
 
 
 def load_checkpoint(
@@ -562,6 +654,7 @@ def main() -> None:
     """
     data_path = Path("../data/trainData.mat")
     result_path = Path("../data/trainResult.mat")
+    export_pt_path = Path("../data/trainResult_full_model.pt")
     checkpoint_path = Path("../checkPoints/dkoia_best.pt")
 
     X_seq, U_seq, P_seq = load_mat_sequences(
@@ -598,12 +691,14 @@ def main() -> None:
         val_ratio=0.1,
         rollout_steps=None,
         checkpoint_path=str(checkpoint_path),
+        resume_from_checkpoint=True,
         print_every=10,
     )
 
     train_dkoia(model, X_seq, U_seq, P_seq, config)
-    save_matrices_mat(model, result_path)
-    print(f"Saved Koopman matrices to {result_path}")
+    export_model_for_matlab(model, result_path, export_pt_path)
+    print(f"Saved Koopman matrices and neural-network parameters to {result_path}")
+    print(f"Saved full PyTorch model parameters to {export_pt_path}")
 
 
 if __name__ == "__main__":
