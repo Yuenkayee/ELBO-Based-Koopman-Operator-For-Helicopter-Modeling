@@ -20,6 +20,10 @@ def reparameterize(mu, logvar, deterministic=False):
     if deterministic:
         return mu
 
+    # Clamp log-variance to avoid extremely large or small standard deviations.
+    # This improves numerical stability during the early training stage.
+    logvar = torch.clamp(logvar, min=-10.0, max=5.0)
+
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(std)
     return mu + std * eps
@@ -240,12 +244,13 @@ class KoopmanLayer(nn.Module):
     For each batch sample, A and B are computed separately.
     """
 
-    def __init__(self, h_dim, u_dim, reg=1e-6):
+    def __init__(self, h_dim, u_dim, reg=1e-6, ridge_reg=1e-4):
         super().__init__()
 
         self.h_dim = h_dim
         self.u_dim = u_dim
         self.reg = reg
+        self.ridge_reg = ridge_reg
 
     def forward(self, h_seq, u_seq):
         """
@@ -306,8 +311,29 @@ class KoopmanLayer(nn.Module):
         Z = torch.cat([H_past, U], dim=0)
         Y = H_next
 
-        Z_pinv = torch.linalg.pinv(Z)
-        K = Y @ Z_pinv
+        if not torch.isfinite(Z).all():
+            raise ValueError("Koopman regression matrix Z contains NaN or Inf.")
+
+        if not torch.isfinite(Y).all():
+            raise ValueError("Koopman regression target Y contains NaN or Inf.")
+
+        # Use ridge-regularized least squares instead of torch.linalg.pinv(Z).
+        # Direct pseudoinverse relies on SVD and can fail when Z is ill-conditioned.
+        # We solve:
+        #     K = Y Z^T (Z Z^T + lambda I)^{-1}
+        # by linear solve:
+        #     (Z Z^T + lambda I) K^T = (Y Z^T)^T
+        G = Z @ Z.T
+        eye = torch.eye(
+            G.shape[0],
+            device=Z.device,
+            dtype=Z.dtype
+        )
+        G_reg = G + self.ridge_reg * eye
+
+        right = Y @ Z.T
+        K_T = torch.linalg.solve(G_reg, right.T)
+        K = K_T.T
 
         A = K[:, :h_dim]
         B = K[:, h_dim:]
@@ -679,8 +705,24 @@ class DKIN(nn.Module):
         Z = torch.cat(Z_blocks, dim=1).to(device)
         Y = torch.cat(Y_blocks, dim=1).to(device)
 
-        Z_pinv = torch.linalg.pinv(Z)
-        K = Y @ Z_pinv
+        if not torch.isfinite(Z).all():
+            raise ValueError("Global Koopman regression matrix Z contains NaN or Inf.")
+
+        if not torch.isfinite(Y).all():
+            raise ValueError("Global Koopman regression target Y contains NaN or Inf.")
+
+        # Use the same ridge-regularized least-squares solver as in training.
+        G = Z @ Z.T
+        eye = torch.eye(
+            G.shape[0],
+            device=Z.device,
+            dtype=Z.dtype
+        )
+        G_reg = G + self.koopman_layer.ridge_reg * eye
+
+        right = Y @ Z.T
+        K_T = torch.linalg.solve(G_reg, right.T)
+        K = K_T.T
 
         A = K[:, :self.h_dim]
         B = K[:, self.h_dim:]
