@@ -627,6 +627,39 @@ def export_model_for_matlab(model: DKOIA, mat_path: str | Path, pt_path: Optiona
         )
 
 
+# -----------------------------------------------------------------------------
+# Checkpointing
+# -----------------------------------------------------------------------------
+
+def save_checkpoint(
+    model: DKOIA,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    history: Dict[str, list[float]],
+    checkpoint_path: str | Path,
+) -> None:
+    """Save a training checkpoint for later continuation."""
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "history": history,
+            "dims": {
+                "x_dim": model.x_dim,
+                "u_dim": model.u_dim,
+                "p_dim": model.p_dim,
+                "z_dim": model.z_dim,
+                "phi_dim": model.phi_dim,
+                "ell_dim": model.ell_dim,
+            },
+        },
+        checkpoint_path,
+    )
+
+
 def load_checkpoint(
     model: DKOIA,
     checkpoint_path: str | Path,
