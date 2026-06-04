@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -16,7 +17,7 @@ from dkin import DKIN, SequenceDataset
 
 CONFIG = {
     # Training hyperparameters
-    "num_epochs": 100,
+    "num_epochs": 600,
     "batch_size": 64,
     "lr": 5e-4,
     "kappa_1": 1.2,
@@ -53,8 +54,8 @@ def get_project_root():
 def prepare_paths():
     project_root = get_project_root()
 
-    data_dir = project_root / "data"
-    checkpoint_dir = project_root / "checkPoints"
+    data_dir = project_root / "DKIN/data"
+    checkpoint_dir = project_root / "DKIN/checkPoints"
 
     data_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +97,14 @@ def load_train_data_from_mat(train_data_path):
     if not train_data_path.exists():
         raise FileNotFoundError(f"Cannot find training data file: {train_data_path}")
 
-    mat_data = loadmat(train_data_path)
+    try:
+        mat_data = loadmat(train_data_path)
+        is_hdf5_mat = False
+    except NotImplementedError as exc:
+        if "matlab v7.3" not in str(exc).lower():
+            raise
+        mat_data = h5py.File(train_data_path, "r")
+        is_hdf5_mat = True
 
     input_keys = []
     result_keys = []
@@ -137,8 +145,20 @@ def load_train_data_from_mat(train_data_path):
                 f"Input/result index mismatch: {input_key} and {result_key}"
             )
 
-        u_i = np.asarray(mat_data[input_key], dtype=np.float32)
-        x_i = np.asarray(mat_data[result_key], dtype=np.float32)
+        if is_hdf5_mat:
+            # MATLAB v7.3 .mat files are HDF5-based. Arrays are often stored
+            # with dimensions reversed compared with scipy.io.loadmat output.
+            # Therefore, transpose 2-D matrices after reading.
+            u_i = np.asarray(mat_data[input_key], dtype=np.float32)
+            x_i = np.asarray(mat_data[result_key], dtype=np.float32)
+
+            if u_i.ndim == 2:
+                u_i = u_i.T
+            if x_i.ndim == 2:
+                x_i = x_i.T
+        else:
+            u_i = np.asarray(mat_data[input_key], dtype=np.float32)
+            x_i = np.asarray(mat_data[result_key], dtype=np.float32)
 
         if u_i.ndim != 2:
             raise ValueError(f"{input_key} should be 2-D, but got shape {u_i.shape}")
@@ -161,6 +181,9 @@ def load_train_data_from_mat(train_data_path):
 
     x_data = np.stack(x_list, axis=0)
     u_data = np.stack(u_list, axis=0)
+
+    if is_hdf5_mat:
+        mat_data.close()
 
     return x_data, u_data
 
