@@ -487,9 +487,9 @@ def main() -> None:
     Modify data_path, dimensions, and hyperparameters according to your process.
     If there is no disturbance p_k, keep p_dim=0 and p_prefix=None.
     """
-    data_path = Path("data/trainData.mat")
-    result_path = Path("data/trainResult.mat")
-    checkpoint_path = Path("checkPoints/dkoia_best.pt")
+    data_path = Path("../data/trainData.mat")
+    result_path = Path("../data/trainResult.mat")
+    checkpoint_path = Path("../checkPoints/dkoia_best.pt")
 
     X_seq, U_seq, P_seq = load_mat_sequences(
         data_path,
