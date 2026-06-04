@@ -744,7 +744,7 @@ def train_dkin(
     kappa_1=1.2,
     kappa_2=1.0,
     omega_T=5.0,
-    device="cpu"
+    device=None
 ):
     """
     Train DKIN model.
@@ -757,6 +757,22 @@ def train_dkin(
         L_Pred = sum_{t=1}^{T-1} ||mu_t - x_t||^2
                  + omega_T ||mu_T - x_T||^2
     """
+
+    if device is None:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA is not available. Please run this training script on a machine "
+                "with a CUDA-capable GPU and a CUDA-enabled PyTorch installation."
+            )
+        device = torch.device("cuda")
+    else:
+        device = torch.device(device)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "The requested device is CUDA, but CUDA is not available in this PyTorch environment."
+            )
+
+    print(f"Using training device: {device}")
 
     model = model.to(device)
 
