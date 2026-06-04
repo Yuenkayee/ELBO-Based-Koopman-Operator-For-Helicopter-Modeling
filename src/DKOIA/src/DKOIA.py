@@ -39,6 +39,11 @@ except ImportError:  # pragma: no cover
     loadmat = None
     savemat = None
 
+try:
+    import h5py
+except ImportError:  # pragma: no cover
+    h5py = None
+
 
 # -----------------------------------------------------------------------------
 # Utilities
@@ -125,6 +130,42 @@ class TrainConfig:
     checkpoint_path: Optional[str] = None
     print_every: int = 10
 
+def _to_numpy_from_mat_value(value) -> np.ndarray:
+    """
+    Convert a variable loaded from either scipy.io.loadmat or h5py to a NumPy array.
+    MATLAB v7.3 files are HDF5 based. h5py reads MATLAB arrays with dimensions
+    reversed compared with scipy.io.loadmat, so 2-D and higher arrays are
+    transposed back to the usual MATLAB/Python orientation.
+    """
+    if h5py is not None and isinstance(value, h5py.Dataset):
+        arr = np.array(value)
+        if arr.ndim >= 2:
+            arr = np.transpose(arr)
+        return arr
+    return np.asarray(value)
+
+def _load_mat_file_auto(mat_path: str | Path) -> Tuple[Dict, bool]:
+    """
+    Load .mat data automatically.
+    Returns:
+        data: mapping from variable name to array-like object.
+        is_hdf5: True for MATLAB v7.3/HDF5 files loaded by h5py.
+
+    """
+    mat_path = str(mat_path)
+    if loadmat is None:
+        raise ImportError("scipy is required to load non-v7.3 .mat files: pip install scipy")
+    try:
+        return loadmat(mat_path), False
+
+    except NotImplementedError as exc:
+        if "matlab v7.3" not in str(exc).lower() and "hdf" not in str(exc).lower():
+            raise
+        if h5py is None:
+            raise ImportError(
+                "This file is a MATLAB v7.3 HDF5 .mat file. Please install h5py: pip install h5py"
+            ) from exc
+        return h5py.File(mat_path, "r"), True
 
 # -----------------------------------------------------------------------------
 # DKOIA model
@@ -386,44 +427,76 @@ def load_mat_sequences(
     State arrays should be [T+1, x_dim]. Input arrays should be [T, u_dim].
     Disturbance arrays are optional and should be [T, p_dim].
     """
-    if loadmat is None:
-        raise ImportError("scipy is required to load .mat files: pip install scipy")
+    data, is_hdf5 = _load_mat_file_auto(mat_path)
 
-    data = loadmat(str(mat_path))
-    indices: list[int] = []
-    for key in data.keys():
-        if key.startswith(x_prefix):
-            suffix = key[len(x_prefix) :]
-            if suffix.isdigit() and f"{u_prefix}{suffix}" in data:
-                indices.append(int(suffix))
-    indices = sorted(indices)
-    if max_sequences is not None:
-        indices = indices[:max_sequences]
-    if not indices:
-        raise ValueError(f"No sequence variables found in {mat_path}")
+    try:
+        indices: list[int] = []
+        keys = list(data.keys())
 
-    X_list, U_list, P_list = [], [], []
-    for idx in indices:
-        X = np.asarray(data[f"{x_prefix}{idx}"], dtype=np.float32)
-        U = np.asarray(data[f"{u_prefix}{idx}"], dtype=np.float32)
-        if X.shape[0] != U.shape[0] + 1:
-            raise ValueError(f"Sequence {idx}: expected X length T+1 and U length T, got {X.shape}, {U.shape}")
-        X_list.append(X)
-        U_list.append(U)
+        for key in keys:
+            if key.startswith(x_prefix):
+                suffix = key[len(x_prefix):]
+                if suffix.isdigit() and f"{u_prefix}{suffix}" in data:
+                    indices.append(int(suffix))
 
-        if p_prefix is not None:
-            p_key = f"{p_prefix}{idx}"
-            if p_key not in data:
-                raise ValueError(f"Missing disturbance variable {p_key}")
-            P = np.asarray(data[p_key], dtype=np.float32)
-            if P.shape[0] != U.shape[0]:
-                raise ValueError(f"Sequence {idx}: expected P length T, got {P.shape}")
-            P_list.append(P)
+        indices = sorted(indices)
 
-    X_seq = np.stack(X_list, axis=0)
-    U_seq = np.stack(U_list, axis=0)
-    P_seq = np.stack(P_list, axis=0) if p_prefix is not None else None
-    return X_seq, U_seq, P_seq
+        if max_sequences is not None:
+            indices = indices[:max_sequences]
+
+        if not indices:
+            raise ValueError(f"No sequence variables found in {mat_path}")
+
+        X_list, U_list, P_list = [], [], []
+
+        for idx in indices:
+            X = _to_numpy_from_mat_value(data[f"{x_prefix}{idx}"]).astype(np.float32)
+            U = _to_numpy_from_mat_value(data[f"{u_prefix}{idx}"]).astype(np.float32)
+
+            X = np.squeeze(X)
+            U = np.squeeze(U)
+
+            if X.ndim == 1:
+                X = X[:, None]
+            if U.ndim == 1:
+                U = U[:, None]
+
+            if X.shape[0] != U.shape[0] + 1:
+                raise ValueError(
+                    f"Sequence {idx}: expected X length T+1 and U length T, "
+                    f"got X.shape={X.shape}, U.shape={U.shape}. "
+                    "If these dimensions look reversed, check the MATLAB save format."
+                )
+
+            X_list.append(X)
+            U_list.append(U)
+
+            if p_prefix is not None:
+                p_key = f"{p_prefix}{idx}"
+
+                if p_key not in data:
+                    raise ValueError(f"Missing disturbance variable {p_key}")
+
+                P = _to_numpy_from_mat_value(data[p_key]).astype(np.float32)
+                P = np.squeeze(P)
+
+                if P.ndim == 1:
+                    P = P[:, None]
+
+                if P.shape[0] != U.shape[0]:
+                    raise ValueError(f"Sequence {idx}: expected P length T, got P.shape={P.shape}")
+
+                P_list.append(P)
+
+        X_seq = np.stack(X_list, axis=0)
+        U_seq = np.stack(U_list, axis=0)
+        P_seq = np.stack(P_list, axis=0) if p_prefix is not None else None
+
+        return X_seq, U_seq, P_seq
+
+    finally:
+        if is_hdf5:
+            data.close()
 
 
 def save_matrices_mat(model: DKOIA, mat_path: str | Path) -> None:
@@ -497,6 +570,12 @@ def main() -> None:
         u_prefix="simu_input_",
         p_prefix=None,
     )
+    
+    print(f"Loaded X_seq shape: {X_seq.shape}")
+    print(f"Loaded U_seq shape: {U_seq.shape}")
+
+    if P_seq is not None:
+        print(f"Loaded P_seq shape: {P_seq.shape}")
 
     x_dim = X_seq.shape[-1]
     u_dim = U_seq.shape[-1]
