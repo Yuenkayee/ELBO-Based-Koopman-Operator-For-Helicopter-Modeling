@@ -8,12 +8,18 @@ from torch.utils.data import Dataset, DataLoader
 # 1. Basic utility functions
 # ============================================================
 
-def reparameterize(mu, logvar):
+def reparameterize(mu, logvar, deterministic=False):
     """
     Reparameterization trick:
         h = mu + std * eps
-    where eps ~ N(0, I)
+    where eps ~ N(0, I).
+
+    If deterministic=True, return mu directly. This is useful when
+    exporting the final Koopman matrices after training.
     """
+    if deterministic:
+        return mu
+
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(std)
     return mu + std * eps
@@ -243,66 +249,80 @@ class KoopmanLayer(nn.Module):
 
     def forward(self, h_seq, u_seq):
         """
+        Compute one shared Koopman model A, B using all samples
+        in the current mini-batch.
+
         Parameters:
             h_seq: [batch, T, h_dim]
             u_seq: [batch, T-1, u_dim]
 
         Returns:
-            A: [batch, h_dim, h_dim]
-            B: [batch, h_dim, u_dim]
+            A: [h_dim, h_dim]
+            B: [h_dim, u_dim]
         """
+        A, B = self.solve_shared_koopman(h_seq, u_seq)
+        return A, B
 
+    def solve_shared_koopman(self, h_seq, u_seq):
+        """
+        Solve [A B] = Y Z^dagger by pooling all samples and all
+        time steps in the provided mini-batch.
+
+        Parameters:
+            h_seq: [batch, T, h_dim]
+            u_seq: [batch, T-1, u_dim]
+
+        Returns:
+            A: [h_dim, h_dim]
+            B: [h_dim, u_dim]
+        """
         batch_size, T, h_dim = h_seq.shape
         _, T_minus_1, u_dim = u_seq.shape
 
         assert T_minus_1 == T - 1
 
-        A_list = []
-        B_list = []
+        # h_past: [batch, T-1, h_dim]
+        # h_next: [batch, T-1, h_dim]
+        h_past = h_seq[:, :-1, :]
+        h_next = h_seq[:, 1:, :]
 
-        for b in range(batch_size):
-            # H_past: [h_dim, T-1]
-            H_past = h_seq[b, :-1, :].T
+        # Pool batch and time dimensions.
+        # h_past_flat: [batch * (T-1), h_dim]
+        # h_next_flat: [batch * (T-1), h_dim]
+        # u_flat:      [batch * (T-1), u_dim]
+        h_past_flat = h_past.reshape(batch_size * T_minus_1, h_dim)
+        h_next_flat = h_next.reshape(batch_size * T_minus_1, h_dim)
+        u_flat = u_seq.reshape(batch_size * T_minus_1, u_dim)
 
-            # H_next: [h_dim, T-1]
-            H_next = h_seq[b, 1:, :].T
+        # H_past: [h_dim, batch * (T-1)]
+        # H_next: [h_dim, batch * (T-1)]
+        # U:      [u_dim, batch * (T-1)]
+        H_past = h_past_flat.T
+        H_next = h_next_flat.T
+        U = u_flat.T
 
-            # U: [u_dim, T-1]
-            U = u_seq[b].T
+        # Z: [h_dim + u_dim, batch * (T-1)]
+        # Y: [h_dim, batch * (T-1)]
+        Z = torch.cat([H_past, U], dim=0)
+        Y = H_next
 
-            # Z: [h_dim + u_dim, T-1]
-            Z = torch.cat([H_past, U], dim=0)
+        Z_pinv = torch.linalg.pinv(Z)
+        K = Y @ Z_pinv
 
-            # Y: [h_dim, T-1]
-            Y = H_next
+        A = K[:, :h_dim]
+        B = K[:, h_dim:]
 
-            # Moore-Penrose pseudoinverse
-            Z_pinv = torch.linalg.pinv(Z)
-
-            # K = [A B]: [h_dim, h_dim + u_dim]
-            K = Y @ Z_pinv
-
-            A = K[:, :h_dim]
-            B = K[:, h_dim:]
-
-            # Small regularization for numerical stability
-            A = A + self.reg * torch.eye(
-                h_dim,
-                device=h_seq.device,
-                dtype=h_seq.dtype
-            )
-
-            A_list.append(A)
-            B_list.append(B)
-
-        A = torch.stack(A_list, dim=0)
-        B = torch.stack(B_list, dim=0)
+        A = A + self.reg * torch.eye(
+            h_dim,
+            device=h_seq.device,
+            dtype=h_seq.dtype
+        )
 
         return A, B
 
     def backward_rollout(self, h_seq, u_seq, A, B):
         """
-        Backward-time latent rollout:
+        Backward-time latent rollout using one shared A, B:
 
             z_T = h_T
             z_t = A^{-1}(z_{t+1} - B u_t)
@@ -310,13 +330,12 @@ class KoopmanLayer(nn.Module):
         Parameters:
             h_seq: [batch, T, h_dim]
             u_seq: [batch, T-1, u_dim]
-            A:     [batch, h_dim, h_dim]
-            B:     [batch, h_dim, u_dim]
+            A:     [h_dim, h_dim]
+            B:     [h_dim, u_dim]
 
         Return:
             z_seq: [batch, T, h_dim]
         """
-
         batch_size, T, h_dim = h_seq.shape
 
         z_list = [None for _ in range(T)]
@@ -328,12 +347,17 @@ class KoopmanLayer(nn.Module):
             z_next = z_list[t + 1]
             u_t = u_seq[:, t, :]
 
-            Bu = torch.bmm(B, u_t.unsqueeze(-1)).squeeze(-1)
+            # u_t: [batch, u_dim]
+            # B.T: [u_dim, h_dim]
+            # Bu: [batch, h_dim]
+            Bu = u_t @ B.T
 
             rhs = z_next - Bu
 
-            # Solve A z_t = rhs instead of explicitly computing A^{-1}
-            z_t = torch.linalg.solve(A, rhs.unsqueeze(-1)).squeeze(-1)
+            # Solve A z_t^T = rhs^T instead of explicitly computing A^{-1}.
+            # rhs.T: [h_dim, batch]
+            # z_t.T: [h_dim, batch]
+            z_t = torch.linalg.solve(A, rhs.T).T
 
             z_list[t] = z_t
 
@@ -455,7 +479,7 @@ class DKIN(nn.Module):
             x_dim=x_dim
         )
 
-    def forward(self, x_seq, u_seq):
+    def forward(self, x_seq, u_seq, deterministic=False):
         batch_size, T, _ = x_seq.shape
 
         # ------------------------------------------------------
@@ -467,7 +491,7 @@ class DKIN(nn.Module):
         # Step 2: Initial observation inference
         # ------------------------------------------------------
         mu_h1, logvar_h1 = self.observation_generator.initial_distribution(I_hat)
-        h_1 = reparameterize(mu_h1, logvar_h1)
+        h_1 = reparameterize(mu_h1, logvar_h1, deterministic=deterministic)
 
         h_list = [h_1]
 
@@ -503,7 +527,7 @@ class DKIN(nn.Module):
                 u_prev=u_prev
             )
 
-            h_t = reparameterize(mu_q, logvar_q)
+            h_t = reparameterize(mu_q, logvar_q, deterministic=deterministic)
 
             h_list.append(h_t)
 
@@ -562,6 +586,117 @@ class DKIN(nn.Module):
             bias: [x_dim]
         """
         return self.decoder.get_decoder_bias()
+
+
+    @torch.no_grad()
+    def infer_h_sequence(self, x_seq, u_seq, deterministic=True):
+        """
+        Infer the Koopman observation sequence h_{1:T} without decoding.
+
+        Parameters:
+            x_seq: [batch, T, x_dim]
+            u_seq: [batch, T-1, u_dim]
+            deterministic: if True, use the posterior mean instead of sampling.
+
+        Return:
+            h_seq: [batch, T, h_dim]
+        """
+        batch_size, T, _ = x_seq.shape
+
+        I_hat = self.temporal_encoder(x_seq, u_seq)
+
+        mu_h1, logvar_h1 = self.observation_generator.initial_distribution(I_hat)
+        h_1 = reparameterize(mu_h1, logvar_h1, deterministic=deterministic)
+
+        h_list = [h_1]
+
+        for t in range(1, T):
+            h_history = torch.stack(h_list, dim=1)
+            I_hat_t = I_hat[:, t, :]
+
+            mu_q, logvar_q = self.observation_generator.recognition_distribution(
+                I_hat_t=I_hat_t,
+                h_history=h_history
+            )
+
+            h_t = reparameterize(mu_q, logvar_q, deterministic=deterministic)
+            h_list.append(h_t)
+
+        h_seq = torch.stack(h_list, dim=1)
+        return h_seq
+
+    @torch.no_grad()
+    def fit_global_koopman_from_dataloader(self, dataloader, device="cpu", deterministic=True):
+        """
+        Fit one final global Koopman model A, B using all sequences in
+        the given dataloader. This is the recommended export step after
+        mini-batch training.
+
+        Parameters:
+            dataloader: yields x_seq [batch, T, x_dim], u_seq [batch, T-1, u_dim]
+            device: torch device
+            deterministic: if True, infer h_seq by posterior means.
+
+        Returns:
+            result: dict with A, B, C, decoder_bias
+        """
+        self.eval()
+
+        Z_blocks = []
+        Y_blocks = []
+
+        for x_seq, u_seq in dataloader:
+            x_seq = x_seq.to(device)
+            u_seq = u_seq.to(device)
+
+            h_seq = self.infer_h_sequence(
+                x_seq=x_seq,
+                u_seq=u_seq,
+                deterministic=deterministic
+            )
+
+            batch_size, T, h_dim = h_seq.shape
+            _, T_minus_1, u_dim = u_seq.shape
+            assert T_minus_1 == T - 1
+
+            h_past = h_seq[:, :-1, :]
+            h_next = h_seq[:, 1:, :]
+
+            h_past_flat = h_past.reshape(batch_size * T_minus_1, h_dim)
+            h_next_flat = h_next.reshape(batch_size * T_minus_1, h_dim)
+            u_flat = u_seq.reshape(batch_size * T_minus_1, u_dim)
+
+            H_past = h_past_flat.T
+            H_next = h_next_flat.T
+            U = u_flat.T
+
+            Z_block = torch.cat([H_past, U], dim=0)
+            Y_block = H_next
+
+            Z_blocks.append(Z_block.cpu())
+            Y_blocks.append(Y_block.cpu())
+
+        Z = torch.cat(Z_blocks, dim=1).to(device)
+        Y = torch.cat(Y_blocks, dim=1).to(device)
+
+        Z_pinv = torch.linalg.pinv(Z)
+        K = Y @ Z_pinv
+
+        A = K[:, :self.h_dim]
+        B = K[:, self.h_dim:]
+
+        A = A + self.koopman_layer.reg * torch.eye(
+            self.h_dim,
+            device=A.device,
+            dtype=A.dtype
+        )
+
+        return {
+            "A": A.detach().cpu(),
+            "B": B.detach().cpu(),
+            "C": self.get_C_matrix(),
+            "decoder_bias": self.get_decoder_bias()
+        }
 
 
 # ============================================================
@@ -638,7 +773,7 @@ def train_dkin(
             x_seq = x_seq.to(device)
             u_seq = u_seq.to(device)
 
-            out = model(x_seq, u_seq)
+            out = model(x_seq, u_seq, deterministic=False)
 
             mu_seq = out["mu_seq"]
             kl_loss = out["kl_loss"]

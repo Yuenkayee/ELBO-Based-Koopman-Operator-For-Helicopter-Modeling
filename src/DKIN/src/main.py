@@ -243,7 +243,7 @@ def train_one_epoch(
         x_seq = x_seq.to(device)
         u_seq = u_seq.to(device)
 
-        out = model(x_seq, u_seq)
+        out = model(x_seq, u_seq, deterministic=False)
 
         mu_seq = out["mu_seq"]
         kl_loss = out["kl_loss"]
@@ -288,60 +288,31 @@ def train_one_epoch(
 @torch.no_grad()
 def export_train_result(model, dataloader, device, train_result_path):
     """
-    Export A, B, C to trainResult.mat.
+    Export the final global Koopman matrices A, B and decoder parameters
+    to trainResult.mat.
 
-    In this DKIN implementation, A and B are inferred from each sequence.
-    Therefore, this function exports their dataset-average values.
+    This function is aligned with the mini-batch training scheme in dkin.py:
+    during training, each mini-batch computes one temporary shared A, B;
+    during export, all S training sequences are pooled to solve one final
+    global A, B.
 
     Saved variables:
-        A
-        B
-        C
-        decoder_bias
+        A:              [h_dim, h_dim]
+        B:              [h_dim, u_dim]
+        C:              [x_dim, h_dim]
+        decoder_bias:   [x_dim]
     """
-    model.eval()
-
-    A_sum = None
-    B_sum = None
-    sample_count = 0
-
-    for x_seq, u_seq in dataloader:
-        x_seq = x_seq.to(device)
-        u_seq = u_seq.to(device)
-
-        out = model(x_seq, u_seq)
-
-        A_batch = out["A"]
-        B_batch = out["B"]
-
-        batch_size = A_batch.shape[0]
-
-        if A_sum is None:
-            A_sum = A_batch.sum(dim=0)
-            B_sum = B_batch.sum(dim=0)
-        else:
-            A_sum += A_batch.sum(dim=0)
-            B_sum += B_batch.sum(dim=0)
-
-        sample_count += batch_size
-
-    A_mean = A_sum / sample_count
-    B_mean = B_sum / sample_count
-
-    # PyTorch Linear:
-    #     mu = z @ weight.T + bias
-    # If z is treated as a column vector:
-    #     mu = C z + bias
-    # Therefore:
-    #     C = weight
-    C = model.decoder.linear.weight.detach().cpu().numpy()
-    decoder_bias = model.decoder.linear.bias.detach().cpu().numpy()
+    result = model.fit_global_koopman_from_dataloader(
+        dataloader=dataloader,
+        device=device,
+        deterministic=True,
+    )
 
     result_dict = {
-        "A": A_mean.detach().cpu().numpy(),
-        "B": B_mean.detach().cpu().numpy(),
-        "C": C,
-        "decoder_bias": decoder_bias,
+        "A": result["A"].numpy(),
+        "B": result["B"].numpy(),
+        "C": result["C"].numpy(),
+        "decoder_bias": result["decoder_bias"].numpy(),
     }
 
     savemat(train_result_path, result_dict)
