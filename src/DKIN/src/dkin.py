@@ -17,12 +17,13 @@ def reparameterize(mu, logvar, deterministic=False):
     If deterministic=True, return mu directly. This is useful when
     exporting the final Koopman matrices after training.
     """
+    # Clamp both mean and log-variance to avoid numerical explosion during
+    # the early training stage.
+    mu = torch.clamp(mu, min=-20.0, max=20.0)
+    logvar = torch.clamp(logvar, min=-10.0, max=2.0)
+
     if deterministic:
         return mu
-
-    # Clamp log-variance to avoid extremely large or small standard deviations.
-    # This improves numerical stability during the early training stage.
-    logvar = torch.clamp(logvar, min=-10.0, max=5.0)
 
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(std)
@@ -39,6 +40,11 @@ def gaussian_kl(mu_q, logvar_q, mu_p, logvar_p):
     Return:
         KL(q || p), averaged over batch.
     """
+    logvar_q = torch.clamp(logvar_q, min=-10.0, max=2.0)
+    logvar_p = torch.clamp(logvar_p, min=-10.0, max=2.0)
+    mu_q = torch.clamp(mu_q, min=-20.0, max=20.0)
+    mu_p = torch.clamp(mu_p, min=-20.0, max=20.0)
+
     var_q = torch.exp(logvar_q)
     var_p = torch.exp(logvar_p)
 
@@ -244,13 +250,14 @@ class KoopmanLayer(nn.Module):
     For each batch sample, A and B are computed separately.
     """
 
-    def __init__(self, h_dim, u_dim, reg=1e-6, ridge_reg=1e-4):
+    def __init__(self, h_dim, u_dim, reg=1e-5, ridge_reg=1e-3, rollout_reg=1e-3):
         super().__init__()
 
         self.h_dim = h_dim
         self.u_dim = u_dim
         self.reg = reg
         self.ridge_reg = ridge_reg
+        self.rollout_reg = rollout_reg
 
     def forward(self, h_seq, u_seq):
         """
@@ -335,6 +342,11 @@ class KoopmanLayer(nn.Module):
         K_T = torch.linalg.solve(G_reg, right.T)
         K = K_T.T
 
+        if not torch.isfinite(K).all():
+            raise ValueError("Koopman matrix K contains NaN or Inf after ridge solve.")
+
+        K = torch.clamp(K, min=-50.0, max=50.0)
+
         A = K[:, :h_dim]
         B = K[:, h_dim:]
 
@@ -369,6 +381,13 @@ class KoopmanLayer(nn.Module):
         z_T = h_seq[:, -1, :]
         z_list[T - 1] = z_T
 
+        eye = torch.eye(
+            h_dim,
+            device=A.device,
+            dtype=A.dtype
+        )
+        A_reg = A + self.rollout_reg * eye
+
         for t in range(T - 2, -1, -1):
             z_next = z_list[t + 1]
             u_t = u_seq[:, t, :]
@@ -380,10 +399,11 @@ class KoopmanLayer(nn.Module):
 
             rhs = z_next - Bu
 
-            # Solve A z_t^T = rhs^T instead of explicitly computing A^{-1}.
+            # Solve A_reg z_t^T = rhs^T instead of explicitly computing A^{-1}.
             # rhs.T: [h_dim, batch]
             # z_t.T: [h_dim, batch]
-            z_t = torch.linalg.solve(A, rhs.T).T
+            z_t = torch.linalg.solve(A_reg, rhs.T).T
+            z_t = torch.clamp(z_t, min=-100.0, max=100.0)
 
             z_list[t] = z_t
 
@@ -565,6 +585,9 @@ class DKIN(nn.Module):
             )
 
         h_seq = torch.stack(h_list, dim=1)
+
+        if not torch.isfinite(h_seq).all():
+            raise ValueError("Inferred h_seq contains NaN or Inf before Koopman layer.")
 
         # ------------------------------------------------------
         # Step 4: Koopman layer
@@ -855,6 +878,7 @@ def train_dkin(
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss_value += loss.item()
