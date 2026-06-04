@@ -370,6 +370,25 @@ class Decoder(nn.Module):
         """
         return self.linear(z_seq)
 
+    def get_C_matrix(self):
+        """
+        Return the linear decoder matrix C_mu used in
+            mu_t = C_mu z_t + bias.
+
+        Shape:
+            C_mu: [x_dim, h_dim]
+        """
+        return self.linear.weight.detach().cpu()
+
+    def get_decoder_bias(self):
+        """
+        Return the decoder bias term.
+
+        Shape:
+            bias: [x_dim]
+        """
+        return self.linear.bias.detach().cpu()
+
 
 # ============================================================
 # 7. Full DKIN Model
@@ -525,6 +544,24 @@ class DKIN(nn.Module):
             "B": B,
             "kl_loss": kl_loss
         }
+
+    def get_C_matrix(self):
+        """
+        Return the decoder matrix C_mu.
+
+        Shape:
+            C_mu: [x_dim, h_dim]
+        """
+        return self.decoder.get_C_matrix()
+
+    def get_decoder_bias(self):
+        """
+        Return the decoder bias term.
+
+        Shape:
+            bias: [x_dim]
+        """
+        return self.decoder.get_decoder_bias()
 
 
 # ============================================================
