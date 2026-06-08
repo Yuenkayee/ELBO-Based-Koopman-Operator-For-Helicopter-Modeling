@@ -27,41 +27,6 @@ For the LSTM-DKOIA version, psi is defined as
 where L is psi_history_steps. During training, the first L states are used to
 initialize z_{L-1}, and rollout starts from input u_{L-1}.
 """
-class LSTMPsi(nn.Module):
-    """LSTM-based observable map psi(x_{k-L+1:k}) -> z_k."""
-
-    def __init__(
-        self,
-        x_dim: int,
-        z_dim: int,
-        hidden_dim: int = 128,
-        num_layers: int = 1,
-        dropout: float = 0.0,
-    ) -> None:
-        super().__init__()
-        self.x_dim = x_dim
-        self.z_dim = z_dim
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.dropout = dropout
-
-        effective_dropout = dropout if num_layers > 1 else 0.0
-        self.lstm = nn.LSTM(
-            input_size=x_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=effective_dropout,
-        )
-        self.proj = nn.Linear(hidden_dim, z_dim)
-
-    def forward(self, x_hist: Tensor) -> Tensor:
-        if x_hist.ndim != 3:
-            raise ValueError(f"x_hist must have shape [batch, L, x_dim], got {tuple(x_hist.shape)}")
-        _, (h_n, _) = self.lstm(x_hist)
-        h_last = h_n[-1]
-        return self.proj(h_last)
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -124,8 +89,45 @@ class MLP(nn.Module):
 
         self.net = nn.Sequential(*layers)
 
+
     def forward(self, x: Tensor) -> Tensor:
         return self.net(x)
+
+
+class LSTMPsi(nn.Module):
+    """LSTM-based observable map psi(x_{k-L+1:k}) -> z_k."""
+
+    def __init__(
+        self,
+        x_dim: int,
+        z_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.x_dim = x_dim
+        self.z_dim = z_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.dropout = dropout
+
+        effective_dropout = dropout if num_layers > 1 else 0.0
+        self.lstm = nn.LSTM(
+            input_size=x_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=effective_dropout,
+        )
+        self.proj = nn.Linear(hidden_dim, z_dim)
+
+    def forward(self, x_hist: Tensor) -> Tensor:
+        if x_hist.ndim != 3:
+            raise ValueError(f"x_hist must have shape [batch, L, x_dim], got {tuple(x_hist.shape)}")
+        _, (h_n, _) = self.lstm(x_hist)
+        h_last = h_n[-1]
+        return self.proj(h_last)
 
 
 class SequenceDataset(Dataset):
