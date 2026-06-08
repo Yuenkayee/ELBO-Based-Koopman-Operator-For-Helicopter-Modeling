@@ -10,9 +10,10 @@ The model follows the input-augmented Koopman structure
     z_{k+1} = A z_k + B ell_k
     x_hat_k = C z_k
 
-where psi and phi are feed-forward neural networks, and A, B, C are
-trainable Koopman matrices. The training loss is a multi-step prediction
-loss in the original state space.
+where psi is an LSTM network acting on a history window of states,
+phi is a feed-forward neural network, and A, B, C are trainable Koopman
+matrices. The training loss is a multi-step prediction loss in the original
+state space.
 
 Expected training data shapes:
     X_seq: [num_seq, T + 1, x_dim]
@@ -20,7 +21,46 @@ Expected training data shapes:
     P_seq: [num_seq, T,     p_dim] or None
 
 If the process has no known disturbance p_k, set p_dim=0 and pass P_seq=None.
+
+For the LSTM-DKOIA version, psi is defined as
+    z_k = psi_lstm(x_{k-L+1}, ..., x_k)
+where L is psi_history_steps. During training, the first L states are used to
+initialize z_{L-1}, and rollout starts from input u_{L-1}.
 """
+class LSTMPsi(nn.Module):
+    """LSTM-based observable map psi(x_{k-L+1:k}) -> z_k."""
+
+    def __init__(
+        self,
+        x_dim: int,
+        z_dim: int,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.x_dim = x_dim
+        self.z_dim = z_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.dropout = dropout
+
+        effective_dropout = dropout if num_layers > 1 else 0.0
+        self.lstm = nn.LSTM(
+            input_size=x_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=effective_dropout,
+        )
+        self.proj = nn.Linear(hidden_dim, z_dim)
+
+    def forward(self, x_hist: Tensor) -> Tensor:
+        if x_hist.ndim != 3:
+            raise ValueError(f"x_hist must have shape [batch, L, x_dim], got {tuple(x_hist.shape)}")
+        _, (h_n, _) = self.lstm(x_hist)
+        h_last = h_n[-1]
+        return self.proj(h_last)
 
 from __future__ import annotations
 
@@ -184,12 +224,19 @@ class DKOIA(nn.Module):
         p_dim: int = 0,
         z_dim: int = 32,
         phi_dim: int = 32,
-        psi_hidden_dims: Sequence[int] = (128, 128),
+        psi_history_steps: int = 8,
+        psi_lstm_hidden_dim: int = 128,
+        psi_lstm_num_layers: int = 1,
+        psi_lstm_dropout: float = 0.0,
         phi_hidden_dims: Sequence[int] = (128, 128),
     ) -> None:
         super().__init__()
         if x_dim <= 0 or u_dim <= 0 or p_dim < 0 or z_dim <= 0 or phi_dim < 0:
             raise ValueError("Invalid dimensions for DKOIA")
+        if psi_history_steps < 1:
+            raise ValueError("psi_history_steps must be >= 1")
+        if psi_lstm_hidden_dim <= 0 or psi_lstm_num_layers <= 0:
+            raise ValueError("Invalid LSTM dimensions for psi_net")
 
         self.x_dim = x_dim
         self.u_dim = u_dim
@@ -198,7 +245,18 @@ class DKOIA(nn.Module):
         self.phi_dim = phi_dim
         self.ell_dim = u_dim + p_dim + phi_dim
 
-        self.psi_net = MLP(x_dim, z_dim, psi_hidden_dims)
+        self.psi_history_steps = psi_history_steps
+        self.psi_lstm_hidden_dim = psi_lstm_hidden_dim
+        self.psi_lstm_num_layers = psi_lstm_num_layers
+        self.psi_lstm_dropout = psi_lstm_dropout
+
+        self.psi_net = LSTMPsi(
+            x_dim=x_dim,
+            z_dim=z_dim,
+            hidden_dim=psi_lstm_hidden_dim,
+            num_layers=psi_lstm_num_layers,
+            dropout=psi_lstm_dropout,
+        )
         self.phi_net = MLP(x_dim + u_dim + p_dim, phi_dim, phi_hidden_dims) if phi_dim > 0 else None
 
         # Linear Koopman matrices. Bias is not used so that these are exactly A, B, C.
@@ -227,8 +285,8 @@ class DKOIA(nn.Module):
     def C(self) -> Tensor:
         return self.C_layer.weight
 
-    def psi(self, x: Tensor) -> Tensor:
-        return self.psi_net(x)
+    def psi(self, x_hist: Tensor) -> Tensor:
+        return self.psi_net(x_hist)
 
     def phi(self, x: Tensor, u: Tensor, p: Optional[Tensor] = None) -> Tensor:
         if p is None:
@@ -253,34 +311,41 @@ class DKOIA(nn.Module):
 
     def rollout(
         self,
-        x0: Tensor,
+        x_hist: Tensor,
         U: Tensor,
         P: Optional[Tensor] = None,
         use_predicted_state_for_phi: bool = True,
     ) -> Tensor:
         """
-        Multi-step prediction from x0.
+        Multi-step prediction initialized by a state history window.
 
         Args:
-            x0: [batch, x_dim]
-            U:  [batch, H, u_dim]
-            P:  [batch, H, p_dim] or None
+            x_hist: [batch, L, x_dim], where L = psi_history_steps. This window
+                represents x_{k-L+1}, ..., x_k and is used to compute z_k.
+            U: [batch, H, u_dim], control sequence starting from u_k.
+            P: [batch, H, p_dim] or None, disturbance sequence starting from p_k.
             use_predicted_state_for_phi:
-                True  -> phi(x_hat_j|k, u_j, p_j), matching the paper's rollout constraint.
-                False -> only useful for diagnostics if measured states are supplied elsewhere.
+                True -> phi(x_hat_j|k, u_j, p_j), matching the paper's rollout constraint.
 
         Returns:
-            X_hat: [batch, H + 1, x_dim]
+            X_hat: [batch, H + 1, x_dim], corresponding to x_hat_k, ..., x_hat_{k+H}.
         """
+        if x_hist.ndim != 3:
+            raise ValueError(f"x_hist must have shape [batch, L, x_dim], got {tuple(x_hist.shape)}")
+        if x_hist.shape[1] != self.psi_history_steps:
+            raise ValueError(
+                f"x_hist length must equal psi_history_steps={self.psi_history_steps}, "
+                f"got {x_hist.shape[1]}"
+            )
         if P is None:
             P = torch.zeros(U.shape[0], U.shape[1], 0, device=U.device, dtype=U.dtype)
 
-        z = self.psi(x0)
+        z = self.psi(x_hist)
         x_hat = self.decode(z)
         predictions = [x_hat]
 
         for t in range(U.shape[1]):
-            x_for_phi = x_hat if use_predicted_state_for_phi else x0
+            x_for_phi = x_hat if use_predicted_state_for_phi else x_hist[:, -1, :]
             z = self.koopman_step(z, x_for_phi, U[:, t, :], P[:, t, :])
             x_hat = self.decode(z)
             predictions.append(x_hat)
@@ -288,7 +353,29 @@ class DKOIA(nn.Module):
         return torch.stack(predictions, dim=1)
 
     def forward(self, X: Tensor, U: Tensor, P: Optional[Tensor] = None) -> Tensor:
-        return self.rollout(X[:, 0, :], U, P)
+        """
+        Forward pass for a full training sequence.
+
+        X: [batch, T+1, x_dim]
+        U: [batch, T, u_dim]
+        P: [batch, T, p_dim] or None
+
+        The first psi_history_steps states initialize z at time k=L-1.
+        Rollout then uses U[:, L-1:, :] and predicts X[:, L-1:, :].
+        """
+        L = self.psi_history_steps
+        if X.shape[1] < L:
+            raise ValueError(f"X sequence length must be at least psi_history_steps={L}")
+        if U.shape[1] < L - 1:
+            raise ValueError(f"U sequence length must be at least psi_history_steps-1={L - 1}")
+
+        x_hist = X[:, :L, :]
+        U_roll = U[:, L - 1 :, :]
+        if P is None:
+            P_roll = None
+        else:
+            P_roll = P[:, L - 1 :, :]
+        return self.rollout(x_hist, U_roll, P_roll)
 
     def matrices_numpy(self) -> Dict[str, np.ndarray]:
         """Return trained A, B, C matrices as NumPy arrays."""
@@ -336,18 +423,29 @@ def one_epoch(
         U = U.to(device)
         P = P.to(device)
 
+        L = model.psi_history_steps
         if rollout_steps is not None:
-            H = min(rollout_steps, U.shape[1])
-            X = X[:, : H + 1, :]
-            U = U[:, :H, :]
-            P = P[:, :H, :]
+            H = min(rollout_steps, U.shape[1] - L + 1)
+            if H < 1:
+                raise ValueError(
+                    f"rollout_steps is too short for psi_history_steps={L}; "
+                    f"sequence U length is {U.shape[1]}"
+                )
+            X = X[:, : L + H, :]
+            U = U[:, : L - 1 + H, :]
+            P = P[:, : L - 1 + H, :]
+        elif U.shape[1] < L - 1:
+            raise ValueError(
+                f"U sequence length {U.shape[1]} must be >= psi_history_steps - 1 = {L - 1}"
+            )
 
         if is_train:
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(is_train):
             X_hat = model(X, U, P)
-            loss = weighted_multistep_loss(X_hat, X)
+            X_target = X[:, model.psi_history_steps - 1 :, :]
+            loss = weighted_multistep_loss(X_hat, X_target)
             if is_train:
                 loss.backward()
                 if grad_clip_norm is not None:
@@ -577,14 +675,33 @@ def _mlp_to_mat(prefix: str, mlp: Optional[MLP]) -> Dict[str, np.ndarray]:
     return out
 
 
+
+def _lstm_psi_to_mat(psi_net: LSTMPsi) -> Dict[str, np.ndarray]:
+    """Export LSTMPsi parameters to MATLAB-friendly arrays."""
+    out: Dict[str, np.ndarray] = {
+        "psi_type": np.array(["lstm"], dtype=object),
+        "psi_num_lstm_layers": np.array([[psi_net.num_layers]], dtype=np.int64),
+        "psi_lstm_hidden_dim": np.array([[psi_net.hidden_dim]], dtype=np.int64),
+        "psi_lstm_input_dim": np.array([[psi_net.x_dim]], dtype=np.int64),
+        "psi_lstm_output_dim": np.array([[psi_net.z_dim]], dtype=np.int64),
+    }
+
+    state = psi_net.lstm.state_dict()
+    for key, value in state.items():
+        out[f"psi_lstm_{key}"] = value.detach().cpu().numpy()
+
+    out.update(_linear_layer_to_mat("psi_proj", psi_net.proj))
+    return out
+
+
 def export_model_for_matlab(model: DKOIA, mat_path: str | Path, pt_path: Optional[str | Path] = None) -> None:
     """
-    Export A, B, C, psi_net and phi_net for MATLAB/Simulink use.
+    Export A, B, C, LSTM psi_net and MLP phi_net for MATLAB/Simulink use.
 
-    The .mat file contains Koopman matrices and all Linear-layer weights/biases
-    of psi_net and phi_net. In MATLAB, each Linear layer should be evaluated as:
-        y = W * x + b
-    with ReLU after each hidden layer and no activation after the final layer.
+    The .mat file contains Koopman matrices, the LSTM parameters of psi_net,
+    the projection layer after the LSTM, and all Linear-layer weights/biases
+    of phi_net. The LSTM gate order follows PyTorch convention:
+        input gate, forget gate, cell gate, output gate.
     """
     if savemat is None:
         raise ImportError("scipy is required to save .mat files: pip install scipy")
@@ -602,8 +719,12 @@ def export_model_for_matlab(model: DKOIA, mat_path: str | Path, pt_path: Optiona
         "z_dim": np.array([[model.z_dim]], dtype=np.int64),
         "phi_dim": np.array([[model.phi_dim]], dtype=np.int64),
         "ell_dim": np.array([[model.ell_dim]], dtype=np.int64),
+        "psi_history_steps": np.array([[model.psi_history_steps]], dtype=np.int64),
+        "psi_lstm_hidden_dim": np.array([[model.psi_lstm_hidden_dim]], dtype=np.int64),
+        "psi_lstm_num_layers": np.array([[model.psi_lstm_num_layers]], dtype=np.int64),
+        "psi_lstm_dropout": np.array([[model.psi_lstm_dropout]], dtype=np.float32),
     }
-    export_dict.update(_mlp_to_mat("psi", model.psi_net))
+    export_dict.update(_lstm_psi_to_mat(model.psi_net))
     export_dict.update(_mlp_to_mat("phi", model.phi_net))
 
     savemat(str(mat_path), export_dict)
@@ -621,6 +742,10 @@ def export_model_for_matlab(model: DKOIA, mat_path: str | Path, pt_path: Optiona
                     "z_dim": model.z_dim,
                     "phi_dim": model.phi_dim,
                     "ell_dim": model.ell_dim,
+                    "psi_history_steps": model.psi_history_steps,
+                    "psi_lstm_hidden_dim": model.psi_lstm_hidden_dim,
+                    "psi_lstm_num_layers": model.psi_lstm_num_layers,
+                    "psi_lstm_dropout": model.psi_lstm_dropout,
                 },
             },
             pt_path,
@@ -654,6 +779,10 @@ def save_checkpoint(
                 "z_dim": model.z_dim,
                 "phi_dim": model.phi_dim,
                 "ell_dim": model.ell_dim,
+                "psi_history_steps": model.psi_history_steps,
+                "psi_lstm_hidden_dim": model.psi_lstm_hidden_dim,
+                "psi_lstm_num_layers": model.psi_lstm_num_layers,
+                "psi_lstm_dropout": model.psi_lstm_dropout,
             },
         },
         checkpoint_path,
@@ -711,9 +840,12 @@ def main() -> None:
         x_dim=x_dim,
         u_dim=u_dim,
         p_dim=p_dim,
-        z_dim=32,
-        phi_dim=32,
-        psi_hidden_dims=(128, 128),
+        z_dim=64,
+        phi_dim=64,
+        psi_history_steps=8,
+        psi_lstm_hidden_dim=128,
+        psi_lstm_num_layers=1,
+        psi_lstm_dropout=0.0,
         phi_hidden_dims=(128, 128),
     )
 
